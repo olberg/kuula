@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kuula-core",
+    "crates/kuula-lua",
+    "crates/kuula-host-sdl",
+    "crates/kuula-host-headless",
+    "crates/kuula-cli",
+    "crates/kuula-mcp",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+kuula-core = { path = "crates/kuula-core" }
+kuula-lua = { path = "crates/kuula-lua" }
+kuula-host-sdl = { path = "crates/kuula-host-sdl" }
+kuula-host-headless = { path = "crates/kuula-host-headless" }
+kuula-mcp = { path = "crates/kuula-mcp" }
+mlua = { version = "0.12", features = ["lua55", "vendored"] }
+sdl2 = { version = "0.38", features = ["bundled", "static-link"] }
+clap = { version = "4", features = ["derive"] }
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
+# Pure Rust zip: stored and deflate entries through flate2's miniz_oxide
+# backend, which png already pulls in. No encryption, no other codecs.
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }

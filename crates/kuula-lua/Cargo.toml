@@ -1,0 +1,12 @@
+[package]
+name = "kuula-lua"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lua 5.5 guest for Kuula through mlua."
+
+[dependencies]
+kuula-core.workspace = true
+mlua.workspace = true
+# Pinned: the numeric profile is this crate's code.
+libm = "=0.2.16"

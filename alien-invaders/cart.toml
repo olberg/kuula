@@ -1,0 +1,6 @@
+[cart]
+title = "Alien Invaders"
+screen_mode = "640x480"
+
+[preload]
+sheets = ["invaders"]

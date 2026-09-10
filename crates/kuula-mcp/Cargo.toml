@@ -1,0 +1,13 @@
+[package]
+name = "kuula-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kuula MCP server: the console over stdio JSON-RPC for agents."
+
+[dependencies]
+kuula-core.workspace = true
+kuula-lua.workspace = true
+kuula-host-headless.workspace = true
+serde.workspace = true
+serde_json.workspace = true

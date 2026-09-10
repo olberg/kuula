@@ -1,0 +1,13 @@
+[package]
+name = "kuula-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Kuula fantasy console, headless. No SDL, no Lua."
+
+[dependencies]
+png.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+zip.workspace = true

@@ -1,0 +1,26 @@
+# SDL2 (through sdl2-sys `bundled`) declares cmake_minimum_required 3.0,
+# which CMake 4 refuses. This tells CMake to configure anyway.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
+# Lua seeds every state's string hash from the wall clock and a stack
+# address (luaL_makeseed in lauxlib.c), so `pairs` order over string keys
+# would differ between runs. lauxlib.c only defines its own luai_makeseed
+# when the macro is unset; this fixes the seed at 0 for the vendored build.
+# cl.exe's /D cannot define a function-like macro, so the replacement is
+# written such that `luai_makeseed()` expands to the constant expression
+# `0u*sizeof !luaL_newstate()`, whose call is never evaluated.
+#
+# LUA_USER_H makes lua.h include crates/kuula-lua/c/kuula_user.h, which
+# routes the float `^` operator and NaN printing through kuula-lua (the
+# numeric profile). The value carries its own double
+# quotes so it is an #include "..." string (cc splits CFLAGS on
+# whitespace only, so they need no further quoting). INCLUDE (cl) and CPATH (gcc,
+# clang) add the header's directory, relative to this repository; cc
+# prepends the toolchain's own paths to INCLUDE. Cargo does not replace
+# an INCLUDE that is already set, so from a Visual Studio developer
+# prompt the Lua build fails with "cannot open include file
+# 'kuula_user.h'" rather than building without the hooks.
+CFLAGS = "-Dluai_makeseed=0u*sizeof!luaL_newstate -DLUA_USER_H=\"kuula_user.h\""
+INCLUDE = { value = "crates/kuula-lua/c", relative = true }
+CPATH = { value = "crates/kuula-lua/c", relative = true }

@@ -1,0 +1,14 @@
+# Hostile carts and the fault code each must end with, within 300 frames.
+# Read by crates/kuula-cli/tests/hostile.rs, in process and with --worker.
+loop budget_exceeded
+recursion budget_exceeded
+coroutines budget_exceeded
+pcall budget_exceeded
+xpcall budget_exceeded
+alloc out_of_memory
+bufs graphics_budget_exceeded
+require_cycle require_cycle
+pattern budget_exceeded
+rep budget_exceeded
+finalizer runtime_error
+draw budget_exceeded

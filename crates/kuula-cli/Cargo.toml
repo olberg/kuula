@@ -1,0 +1,28 @@
+[package]
+name = "kuula-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kuula command line."
+
+[[bin]]
+name = "kuula"
+path = "src/main.rs"
+
+[dependencies]
+kuula-core.workspace = true
+kuula-lua.workspace = true
+kuula-host-sdl.workspace = true
+kuula-host-headless.workspace = true
+kuula-mcp.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+png.workspace = true
+
+[build-dependencies]
+# Embeds assets/branding/kuula.ico into kuula.exe (build.rs).
+tauri-winres = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }

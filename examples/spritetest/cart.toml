@@ -1,0 +1,6 @@
+[cart]
+title = "Alien Sprite Test"
+screen_mode = "640x480"
+
+[preload]
+sheets = ["invaders"]

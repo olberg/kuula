@@ -1,0 +1,9 @@
+; conformance sound effect: two rows on one channel
+tempo 4
+inst 1 pulse duty=25 adsr=0,3,40,2 slide=8
+inst 2 noise adsr=0,2,0,0
+C-5 1 vf
+G-5 1 vc
+---
+C-4 2 v9
+===

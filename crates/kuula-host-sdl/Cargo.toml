@@ -1,0 +1,10 @@
+[package]
+name = "kuula-host-sdl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SDL2 desktop host for Kuula with an integer scaler."
+
+[dependencies]
+kuula-core.workspace = true
+sdl2.workspace = true

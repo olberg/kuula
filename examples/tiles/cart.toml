@@ -1,0 +1,7 @@
+[cart]
+title = "Tiles"
+screen_mode = "320x240"
+
+[preload]
+sheets = ["tiles"]
+maps = ["overworld"]

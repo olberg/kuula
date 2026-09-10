@@ -1,0 +1,15 @@
+; conformance music: three channels, loops from row 0
+tempo 6
+loop 0
+inst 1 saw adsr=0,4,60,4
+inst 2 tri adsr=1,2,80,3 arp=0,4,7
+inst 3 sample=tick
+inst 4 sine adsr=0,0,100,6
+C-3 1 vd | C-5 2 va | C-4 3 vf
+---      | ---      | ---
+G-3 1    | E-5 2    | ---
+---      | ===      | G-4 3 v8
+A#3 1 vb | G-5 2 v9 | ---
+---      | ---      | ---
+G-3 1    | D-5 4 vc | C-4 3
+===      | ===      | ---
