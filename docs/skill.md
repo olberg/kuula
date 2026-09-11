@@ -147,6 +147,10 @@ characters removed. Do not try to format with escape sequences.
   at the top of `main.lua`, with `src/player.lua` returning a table.
 - Detect a win or lose state in `_update` and expose it as a global
   (`state = "won"`) so the `state` tool and tests can read it.
+- With `services = ["net"]`, drain `net.recv()` at the top of
+  `_update` into your own tables and draw from those; never draw from
+  the inbox, and never expect a reply in the same frame. A `failed`
+  event is data, not an error: show it and carry on offline.
 
 ## Iterating with the MCP tools
 

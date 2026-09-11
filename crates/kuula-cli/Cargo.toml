@@ -15,6 +15,8 @@ kuula-lua.workspace = true
 kuula-host-sdl.workspace = true
 kuula-host-headless.workspace = true
 kuula-mcp.workspace = true
+# Only `net_cmd` constructs a `Net`; see docs/net.md.
+kuula-net = { path = "../kuula-net" }
 clap.workspace = true
 
 [dev-dependencies]

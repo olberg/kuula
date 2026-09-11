@@ -42,6 +42,22 @@ impl ScreenMode {
     }
 }
 
+/// A host service a cart declares under `[cart] services`. Only `net`
+/// exists; an unknown name is a manifest error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum Service {
+    #[serde(rename = "net")]
+    Net,
+}
+
+impl Service {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Service::Net => "net",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Manifest {
     pub title: String,
@@ -50,6 +66,14 @@ pub struct Manifest {
     pub preload_sheets: Vec<String>,
     /// Map names decoded at boot, `map/<name>.json`.
     pub preload_maps: Vec<String>,
+    /// Host services the cart asked for; `net` gives it the `net` table.
+    pub services: Vec<Service>,
+}
+
+impl Manifest {
+    pub fn has_service(&self, s: Service) -> bool {
+        self.services.contains(&s)
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -68,6 +92,8 @@ struct CartSection {
     title: String,
     #[serde(default)]
     screen_mode: ScreenMode,
+    #[serde(default)]
+    services: Vec<Service>,
 }
 
 #[derive(Deserialize, Default)]
@@ -132,11 +158,14 @@ impl Manifest {
         };
         names(&file.preload.sheets, "sheets")?;
         names(&file.preload.maps, "maps")?;
+        let mut services = file.cart.services;
+        services.dedup();
         Ok(Manifest {
             title: file.cart.title,
             screen_mode: file.cart.screen_mode,
             preload_sheets: file.preload.sheets,
             preload_maps: file.preload.maps,
+            services,
         })
     }
 }
@@ -185,6 +214,19 @@ mod tests {
         assert!(e.message.contains("screenmode"), "{}", e.message);
         let e = Manifest::parse("[preload]\nsheets = [\"../x\"]\n").unwrap_err();
         assert!(e.message.contains("../x"), "{}", e.message);
+    }
+
+    #[test]
+    fn services_are_a_closed_list() {
+        let m = Manifest::parse("[cart]\nservices = [\"net\", \"net\"]\n").unwrap();
+        assert_eq!(m.services, [Service::Net]);
+        assert!(m.has_service(Service::Net));
+        assert!(!Manifest::default().has_service(Service::Net));
+        let e = Manifest::parse("[cart]\nservices = [\"gossip\"]\n").unwrap_err();
+        assert!(e.message.contains("gossip"), "{}", e.message);
+        assert_eq!(e.line, Some(2));
+        let e = Manifest::parse("[cart]\nservice = [\"net\"]\n").unwrap_err();
+        assert!(e.message.contains("service"), "{}", e.message);
     }
 
     #[test]

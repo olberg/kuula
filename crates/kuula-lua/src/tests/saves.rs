@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{console, run};
+use crate::api::Price;
 use kuula_core::save::{MemoryStore, SaveError, SaveStore};
 use kuula_core::{Console, FrameInput};
 
@@ -202,6 +203,41 @@ fn saves_are_priced_by_bytes() {
     );
     c.step(FrameInput::NONE);
     assert_eq!(log(&c), ["true\ttrue"]);
+}
+
+/// `save` and `load` charge what the reference says: the flat cost,
+/// then the byte prices, and the flat cost alone for an empty slot.
+#[test]
+fn save_and_load_charge_what_the_reference_says() {
+    let store = Shared::default();
+    let mut c = console_with(
+        "local function delta(f)\n\
+           local a = stat('cpu_cycles')\n\
+           f()\n\
+           return stat('cpu_cycles') - a - 1\n\
+         end\n\
+         local t = {}\nfor i = 1, 20 do t[i] = 'abcdefgh' end\n\
+         local saved = delta(function() save(0, t) end)\n\
+         local loaded = delta(function() load(0) end)\n\
+         local empty = delta(function() load(7) end)\n\
+         print(saved .. ' ' .. loaded .. ' ' .. empty)",
+        &store,
+    );
+    c.step(FrameInput::NONE);
+    assert_eq!(c.state().fault(), None, "{:?}", c.state());
+    let line = log(&c).remove(0);
+    let n: Vec<u64> = line.split(' ').map(|p| p.parse().unwrap()).collect();
+    let stored = slot_text(&store, 0).unwrap().len() as u64;
+    assert_eq!(n[1], Price::load(Some(stored)), "load by stored bytes");
+    assert_eq!(n[2], Price::load(None), "an empty slot is the flat cost");
+    // The walked size is the codec's; the formula holds with it.
+    let walked = (n[0] - Price::Save.formula().unwrap().eval(&[0, stored])) * 8;
+    assert_eq!(
+        n[0],
+        Price::Save.formula().unwrap().eval(&[walked, stored]),
+        "save by walked and encoded bytes"
+    );
+    assert!(walked >= 20 * 8, "twenty strings were walked: {walked}");
 }
 
 #[test]

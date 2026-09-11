@@ -2,6 +2,8 @@
 //! one cycle; the mixer's own work is not charged.
 //! Errors carry the core's `AudioError` code into the fault.
 
+use crate::api::reg::Reg;
+use crate::api::{Group, Price, Scope, Sig};
 use crate::bindings::with_ctx;
 use crate::meter::charge;
 use crate::FrameCtx;
@@ -41,41 +43,105 @@ fn pitch(v: Option<f64>) -> u32 {
     (v.clamp(1.0 / 256.0, 16.0) * 65536.0).round() as u32
 }
 
-pub fn install(lua: &Lua) -> Result<()> {
-    let g = lua.globals();
-
-    g.set(
-        "sfx",
-        lua.create_function(|lua, (name, ch): (String, Option<f64>)| {
-            audio(lua, |ctx| ctx.state.sfx(&name, channel(ch))).map(|c| c as i64)
-        })?,
-    )?;
+pub(crate) fn install(reg: &mut Reg<'_>) -> Result<()> {
+    reg.function(&SFX, |lua, (name, ch): (String, Option<f64>)| {
+        audio(lua, |ctx| ctx.state.sfx(&name, channel(ch))).map(|c| c as i64)
+    })?;
 
     // `music(name, fade_frames?)`; `music()` or `music(nil, fade)` stops.
-    g.set(
-        "music",
-        lua.create_function(|lua, (name, fade): (Option<String>, Option<f64>)| {
+    reg.function(
+        &MUSIC,
+        |lua, (name, fade): (Option<String>, Option<f64>)| {
             let fade = fade.map(to_int).unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
             audio(lua, |ctx| ctx.state.music(name.as_deref(), fade))
-        })?,
+        },
     )?;
 
-    g.set(
-        "sample",
-        lua.create_function(|lua, (name, ch, p): (String, Option<f64>, Option<f64>)| {
+    reg.function(
+        &SAMPLE,
+        |lua, (name, ch, p): (String, Option<f64>, Option<f64>)| {
             audio(lua, |ctx| ctx.state.sample(&name, channel(ch), pitch(p))).map(|c| c as i64)
-        })?,
+        },
     )?;
 
-    g.set(
-        "volume",
-        lua.create_function(|lua, (ch, v): (f64, f64)| {
-            audio(lua, |ctx| ctx.state.volume(to_int(ch), gain(v)))?;
-            Ok(Value::Nil)
-        })?,
-    )?;
+    reg.function(&VOLUME, |lua, (ch, v): (f64, f64)| {
+        audio(lua, |ctx| ctx.state.volume(to_int(ch), gain(v)))?;
+        Ok(Value::Nil)
+    })?;
     Ok(())
 }
+
+const AUDIO_ERRORS: &[&str] = &[
+    "asset_not_found",
+    "asset_invalid",
+    "track_error",
+    "audio_bad_channel",
+    "audio_no_room",
+];
+
+binding!(SFX {
+    name: "sfx",
+    scope: Scope::Global,
+    group: Group::Audio,
+    sigs: &[Sig::new("sfx(name, [channel])", "the channel it plays on",)],
+    price: Price::One,
+    defaults: &[("channel", "a free one")],
+    errors: AUDIO_ERRORS,
+    doc: "`name` is the stem of `sfx/<name>.trk`.",
+});
+
+binding!(MUSIC {
+    name: "music",
+    scope: Scope::Global,
+    group: Group::Audio,
+    sigs: &[
+        Sig::new(
+            "music(name, [fade])",
+            "nothing; starts the track, fading over `fade` frames",
+        ),
+        Sig::new("music()", "nothing; stops the track"),
+        Sig::new(
+            "music(nil, fade)",
+            "nothing; stops the track over `fade` frames"
+        ),
+    ],
+    price: Price::One,
+    defaults: &[("fade", "0")],
+    errors: AUDIO_ERRORS,
+    doc: "`name` is the stem of `music/<name>.trk`.",
+});
+
+binding!(SAMPLE {
+    name: "sample",
+    scope: Scope::Global,
+    group: Group::Audio,
+    sigs: &[Sig::new(
+        "sample(name, [channel, pitch])",
+        "the channel it plays on",
+    )],
+    price: Price::One,
+    defaults: &[("channel", "a free one"), ("pitch", "1.0")],
+    errors: &[
+        "asset_not_found",
+        "asset_invalid",
+        "sample_error",
+        "audio_bad_channel",
+    ],
+    doc: "`name` is the stem of `samples/<name>.wav`. `pitch` 1.0 is \
+          native, clamped to 1/256 to 16.",
+});
+
+binding!(VOLUME {
+    name: "volume",
+    scope: Scope::Global,
+    group: Group::Audio,
+    sigs: &[Sig::new(
+        "volume(channel, v)",
+        "nothing; channel gain 0.0 to 1.0, clamped",
+    )],
+    price: Price::One,
+    errors: &["audio_bad_channel"],
+});
 
 #[cfg(test)]
 mod tests {

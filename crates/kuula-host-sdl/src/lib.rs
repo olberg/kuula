@@ -19,7 +19,8 @@ pub mod scale;
 
 use std::time::Duration;
 
-use kuula_core::shell::SysRequest;
+use kuula_core::net::Link;
+use kuula_core::shell::{Settings, SysRequest};
 use kuula_core::{error_screen, Console, ConsoleState, FRAME_RATE};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -32,6 +33,23 @@ pub struct HostOptions {
     /// Integer scale, 1 to 4.
     pub scale: u32,
     pub title: String,
+    /// The network link the console steps through, for a cart that
+    /// may use the network; `None` steps without one.
+    pub link: Option<Link>,
+    /// Told the shell's settings after every change, so the host can
+    /// persist them.
+    pub on_settings: Option<Box<dyn FnMut(Settings)>>,
+}
+
+impl HostOptions {
+    pub fn new(scale: u32, title: impl Into<String>) -> HostOptions {
+        HostOptions {
+            scale,
+            title: title.into(),
+            link: None,
+            on_settings: None,
+        }
+    }
 }
 
 /// Why the loop ended.
@@ -52,6 +70,8 @@ pub fn run(
     opts: HostOptions,
 ) -> Result<(Exit, ConsoleState), String> {
     let scale = scale::clamp(opts.scale);
+    let mut link = opts.link;
+    let mut on_settings = opts.on_settings;
     let mut console = make();
     // The cart's declared mode: the texture is that size, and the
     // window is the primary mode times the scale whatever the cart
@@ -141,17 +161,36 @@ pub fn run(
 
         // Step, then read the frame back through the shared borrow so
         // the state can be inspected beside it.
-        console.step(keys.input());
+        match link.as_mut() {
+            Some(l) => console.step_linked(l, keys.input()),
+            None => {
+                console.step(keys.input());
+            }
+        }
         for e in console.take_save_failures() {
             eprintln!("save: {e}");
         }
-        for request in console.take_host_requests() {
-            if let SysRequest::SetScale(new_scale) = request {
-                let (win_w, win_h) = scale::window_size(new_scale);
-                canvas
-                    .window_mut()
-                    .set_size(win_w, win_h)
-                    .map_err(|e| e.to_string())?;
+        let requests = console.take_host_requests();
+        for request in &requests {
+            match request {
+                SysRequest::SetScale(new_scale) => {
+                    let (win_w, win_h) = scale::window_size(*new_scale);
+                    canvas
+                        .window_mut()
+                        .set_size(win_w, win_h)
+                        .map_err(|e| e.to_string())?;
+                }
+                SysRequest::SetNet(on) => {
+                    if let Some(l) = link.as_mut() {
+                        l.set_permitted(*on);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !requests.is_empty() {
+            if let Some(f) = on_settings.as_mut() {
+                f(console.settings());
             }
         }
         let out = console.output();

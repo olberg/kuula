@@ -1,4 +1,4 @@
-//! Replay transcripts (format version 1).
+//! Replay transcripts (format versions 1 and 2).
 //!
 //! A transcript is everything a cart could have observed: the initial
 //! environment (cart content digest, runtime version, seed, the save
@@ -8,14 +8,17 @@
 //! do not depend on the host ([`crate::save::WriteThroughStore`]). The
 //! per-frame messages, connection changes and I/O outcomes the
 //! architecture reserves are keys later versions may add to a record;
-//! version 1 writes none and refuses a record that carries any.
+//! version 1 writes none and refuses a record that carries any. Version
+//! 2 (`v2.rs`), written only for a cart that declares the `net`
+//! service, adds the network events admitted per frame and the
+//! commands the cart issued.
 //!
 //! The file (`.kr`) is line-oriented so it streams and stays within the
 //! canonical codec's per-document limits:
 //!
 //! ```text
 //! kuula-transcript 1
-//! { cart = "0x...", frames = N, runtime = "0.0.1", seed = 0, version = 1 }
+//! { cart = "0x...", frames = N, runtime = "0.0.2", seed = 0, version = 1 }
 //! { data = blob"...", part = 1, parts = 3, slot = 0 }      -- save chunks
 //! { buttons = 8, frames = 30 }                              -- input runs
 //! ```
@@ -26,6 +29,8 @@
 //! decoder bounds the file, every line, the frame count and the chunks
 //! before it allocates.
 
+pub mod v2;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -34,10 +39,15 @@ use crate::console::{FactoryFn, Guest};
 use crate::draw::DrawState;
 use crate::fault::Fault;
 use crate::input::{FrameInput, CART_BUTTONS};
+use crate::net::{Command, Event, NetEnv};
 use crate::save::{check_size, check_slot, SLOT_COUNT};
 use crate::snapshot::Snapshot;
 
+pub use v2::{FrameNet, NetRecord, ReplayGuest, DIVERGENCE};
+
 pub const FORMAT_VERSION: i64 = 1;
+/// The version written for a cart with the `net` service.
+pub const NET_FORMAT_VERSION: i64 = 2;
 pub const MAGIC: &str = "kuula-transcript";
 /// The file extension a transcript is written with.
 pub const EXTENSION: &str = "kr";
@@ -78,6 +88,19 @@ impl Header {
 pub struct Transcript {
     pub header: Header,
     pub inputs: Vec<FrameInput>,
+    /// The networking records; present in a version 2 file.
+    pub net: Option<NetRecord>,
+}
+
+impl Transcript {
+    /// The format version this transcript is written as.
+    pub fn version(&self) -> i64 {
+        if self.net.is_some() {
+            NET_FORMAT_VERSION
+        } else {
+            FORMAT_VERSION
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,14 +119,14 @@ impl TranscriptError {
     /// The cart being replayed is not the one recorded.
     pub const CART: &'static str = "transcript_cart_mismatch";
 
-    fn new(code: &'static str, message: impl Into<String>) -> TranscriptError {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> TranscriptError {
         TranscriptError {
             code,
             message: message.into(),
         }
     }
 
-    fn format(message: impl Into<String>) -> TranscriptError {
+    pub(crate) fn format(message: impl Into<String>) -> TranscriptError {
         TranscriptError::new(TranscriptError::FORMAT, message)
     }
 }
@@ -140,7 +163,7 @@ pub fn cart_digest(snapshot: &Snapshot) -> String {
 
 // ----- encoding -----------------------------------------------------------
 
-fn table(entries: Vec<(&str, Value)>) -> Result<Value, TranscriptError> {
+pub(crate) fn table(entries: Vec<(&str, Value)>) -> Result<Value, TranscriptError> {
     let mut t = Table::new();
     for (k, v) in entries {
         t.insert(Key::str(k), v)
@@ -161,14 +184,30 @@ impl Transcript {
                 format!("more than {MAX_FRAMES} frames"),
             ));
         }
-        let mut out = format!("{MAGIC} {FORMAT_VERSION}\n");
-        let header = table(vec![
+        let version = self.version();
+        let mut out = format!("{MAGIC} {version}\n");
+        let mut fields = vec![
             ("cart", Value::str(&self.header.cart)),
             ("frames", Value::Int(self.inputs.len() as i64)),
-            ("runtime", Value::str(&self.header.runtime)),
-            ("seed", Value::Int(self.header.seed)),
-            ("version", Value::Int(FORMAT_VERSION)),
-        ])?;
+        ];
+        if let Some(net) = &self.net {
+            let services: Vec<Value> = net.services.iter().map(|s| Value::str(s)).collect();
+            let mut list = Table::new();
+            for (i, v) in services.into_iter().enumerate() {
+                list.insert(Key::Int(i as i64 + 1), v)
+                    .map_err(|e| TranscriptError::new(TranscriptError::SIZE, e.to_string()))?;
+            }
+            fields.push((
+                "invite",
+                Value::str(net.env.invite.as_deref().unwrap_or("")),
+            ));
+            fields.push(("net", Value::Bool(net.env.permitted)));
+            fields.push(("services", Value::Table(list)));
+        }
+        fields.push(("runtime", Value::str(&self.header.runtime)));
+        fields.push(("seed", Value::Int(self.header.seed)));
+        fields.push(("version", Value::Int(version)));
+        let header = table(fields)?;
         out.push_str(&line(&header)?);
         out.push('\n');
         for (slot, bytes) in &self.header.saves {
@@ -191,11 +230,24 @@ impl Transcript {
                 out.push('\n');
             }
         }
+        // Network records, in frame order; a run of inputs never spans
+        // past a frame that has one, and the record follows its run.
+        let mut net_frames = self
+            .net
+            .as_ref()
+            .map(|n| n.frames.iter().peekable())
+            .into_iter()
+            .flatten()
+            .peekable();
         let mut i = 0;
         while i < self.inputs.len() {
             let buttons = self.inputs[i].buttons;
             let mut n = 1;
-            while i + n < self.inputs.len() && self.inputs[i + n].buttons == buttons {
+            let stop_at = net_frames.peek().map(|f| f.at as usize);
+            while i + n < self.inputs.len()
+                && self.inputs[i + n].buttons == buttons
+                && stop_at != Some(i + n)
+            {
                 n += 1;
             }
             let record = table(vec![
@@ -205,6 +257,26 @@ impl Transcript {
             out.push_str(&line(&record)?);
             out.push('\n');
             i += n;
+            while let Some(f) = net_frames.peek() {
+                if f.at as usize != i {
+                    if (f.at as usize) < i {
+                        return Err(TranscriptError::format(format!(
+                            "network record for frame {} out of order",
+                            f.at
+                        )));
+                    }
+                    break;
+                }
+                out.push_str(&line(&v2::frame_value(f)?)?);
+                out.push('\n');
+                net_frames.next();
+            }
+        }
+        if let Some(f) = net_frames.next() {
+            return Err(TranscriptError::format(format!(
+                "network record for frame {} past the last input",
+                f.at
+            )));
         }
         Ok(out)
     }
@@ -232,16 +304,18 @@ impl Transcript {
             .next()
             .and_then(|v| v.parse().ok())
             .ok_or_else(|| TranscriptError::format("missing format version"))?;
-        if version != FORMAT_VERSION {
+        if version != FORMAT_VERSION && version != NET_FORMAT_VERSION {
             return Err(TranscriptError::new(
                 TranscriptError::VERSION,
-                format!("format version {version}; this runtime reads {FORMAT_VERSION}"),
+                format!(
+                    "format version {version}; this runtime reads {FORMAT_VERSION} and {NET_FORMAT_VERSION}"
+                ),
             ));
         }
         let (n, header_line) = lines
             .next()
             .ok_or_else(|| TranscriptError::format("missing header"))?;
-        let header = parse_line(n, header_line)?;
+        let header = parse_line(n, header_line, version)?;
         let frames = get_int(&header, "frames", n)?;
         if !(0..=MAX_FRAMES as i64).contains(&frames) {
             return Err(TranscriptError::new(
@@ -249,12 +323,17 @@ impl Transcript {
                 format!("header claims {frames} frames; the limit is {MAX_FRAMES}"),
             ));
         }
-        if get_int(&header, "version", n)? != FORMAT_VERSION {
+        if get_int(&header, "version", n)? != version {
             return Err(TranscriptError::new(
                 TranscriptError::VERSION,
                 "header version disagrees with the first line",
             ));
         }
+        let net = if version == NET_FORMAT_VERSION {
+            Some(v2::header_net(&header, n)?)
+        } else {
+            None
+        };
         let mut out = Transcript {
             header: Header {
                 runtime: get_str(&header, "runtime", n)?,
@@ -263,6 +342,7 @@ impl Transcript {
                 saves: Vec::new(),
             },
             inputs: Vec::with_capacity((frames as usize).min(65_536)),
+            net,
         };
         // Save chunks in progress: slot, expected part count, bytes so far.
         let mut chunking: Option<(u8, i64, i64, Vec<u8>)> = None;
@@ -270,7 +350,25 @@ impl Transcript {
             if text.is_empty() {
                 continue;
             }
-            let record = parse_line(n, text)?;
+            let record = parse_line(n, text, version)?;
+            if record.get(&Key::str("at")).is_some() {
+                let Some(net) = out.net.as_mut() else {
+                    return Err(TranscriptError::new(
+                        TranscriptError::VERSION,
+                        format!("line {}: network records need format version 2", n + 1),
+                    ));
+                };
+                if chunking.is_some() {
+                    return Err(TranscriptError::format(format!(
+                        "line {}: save chunk sequence interrupted",
+                        n + 1
+                    )));
+                }
+                let last = net.frames.last().map(|f| f.at);
+                let frame = v2::frame_of(&record, n, out.inputs.len(), last)?;
+                net.frames.push(frame);
+                continue;
+            }
             if let Some(v) = record.get(&Key::str("slot")) {
                 let slot = int_of(v, "slot", n)?;
                 let part = get_int(&record, "part", n)?;
@@ -384,7 +482,7 @@ impl Transcript {
     }
 }
 
-fn parse_line(n: usize, text: &str) -> Result<Table, TranscriptError> {
+fn parse_line(n: usize, text: &str, version: i64) -> Result<Table, TranscriptError> {
     if text.len() > MAX_LINE_BYTES {
         return Err(TranscriptError::new(
             TranscriptError::SIZE,
@@ -393,14 +491,21 @@ fn parse_line(n: usize, text: &str) -> Result<Table, TranscriptError> {
     }
     match codec::decode(text) {
         Ok(Value::Table(t)) => {
-            for reserved in ["messages", "io", "connections"] {
+            // Version 1 reserved these and version 2 uses `io` and
+            // `events`; `messages` and `connections` stay reserved.
+            let reserved: &[&str] = if version == FORMAT_VERSION {
+                &["messages", "io", "connections", "events", "at"]
+            } else {
+                &["messages", "connections"]
+            };
+            for reserved in reserved {
                 if let Some(v) = t.get(&Key::str(reserved)) {
                     let empty = matches!(v, Value::Table(t) if t.is_empty());
                     if !empty {
                         return Err(TranscriptError::new(
                             TranscriptError::VERSION,
                             format!(
-                                "line {}: `{reserved}` is not supported in format version 1",
+                                "line {}: `{reserved}` is not supported in format version {version}",
                                 n + 1
                             ),
                         ));
@@ -417,7 +522,7 @@ fn parse_line(n: usize, text: &str) -> Result<Table, TranscriptError> {
     }
 }
 
-fn int_of(v: &Value, key: &str, n: usize) -> Result<i64, TranscriptError> {
+pub(crate) fn int_of(v: &Value, key: &str, n: usize) -> Result<i64, TranscriptError> {
     match v {
         Value::Int(i) => Ok(*i),
         _ => Err(TranscriptError::format(format!(
@@ -427,13 +532,13 @@ fn int_of(v: &Value, key: &str, n: usize) -> Result<i64, TranscriptError> {
     }
 }
 
-fn get_int(t: &Table, key: &str, n: usize) -> Result<i64, TranscriptError> {
+pub(crate) fn get_int(t: &Table, key: &str, n: usize) -> Result<i64, TranscriptError> {
     t.get(&Key::str(key))
         .ok_or_else(|| TranscriptError::format(format!("line {}: missing `{key}`", n + 1)))
         .and_then(|v| int_of(v, key, n))
 }
 
-fn get_str(t: &Table, key: &str, n: usize) -> Result<String, TranscriptError> {
+pub(crate) fn get_str(t: &Table, key: &str, n: usize) -> Result<String, TranscriptError> {
     match t.get(&Key::str(key)) {
         Some(Value::Str(s)) => String::from_utf8(s.clone())
             .map_err(|_| TranscriptError::format(format!("line {}: `{key}` is not UTF-8", n + 1))),
@@ -452,6 +557,8 @@ pub struct Recorder {
     header: Header,
     inputs: Vec<FrameInput>,
     overflowed: bool,
+    /// The networking records, once a cart with the service is seen.
+    net: Option<v2::NetRecorder>,
 }
 
 pub type SharedRecorder = Rc<RefCell<Recorder>>;
@@ -462,6 +569,39 @@ impl Recorder {
             header,
             inputs: Vec::new(),
             overflowed: false,
+            net: None,
+        }
+    }
+
+    /// The cart declares the `net` service: the transcript is version 2
+    /// from here on, with `env` in its header. Idempotent.
+    pub fn enable_net(&mut self, env: &NetEnv) {
+        if self.net.is_none() {
+            self.net = Some(v2::NetRecorder::new(env.clone()));
+        }
+    }
+
+    /// The network traffic of the frame last recorded with `record`:
+    /// the admitted batch and the commands issued. Past the byte budget
+    /// the recorder stops and is no longer complete.
+    pub fn record_net(&mut self, events: &[Event], commands: &[Command]) {
+        if self.overflowed {
+            return;
+        }
+        let at = self.inputs.len() as u64;
+        let Some(net) = self.net.as_mut() else {
+            return;
+        };
+        let frame = FrameNet {
+            at,
+            events: events.to_vec(),
+            commands: commands.to_vec(),
+        };
+        if !net.record(frame) {
+            // The frame's input went in with `record`; take it back so
+            // the transcript stays a prefix of the run.
+            self.inputs.pop();
+            self.overflowed = true;
         }
     }
 
@@ -472,6 +612,9 @@ impl Recorder {
     /// One frame the cart saw. Past the limit the frame is dropped and
     /// the recorder remembers that it is no longer complete.
     pub fn record(&mut self, input: FrameInput) {
+        if self.overflowed {
+            return;
+        }
         if self.inputs.len() as u64 >= MAX_FRAMES {
             self.overflowed = true;
         } else {
@@ -492,6 +635,7 @@ impl Recorder {
         Transcript {
             header: self.header.clone(),
             inputs: self.inputs.clone(),
+            net: self.net.as_ref().map(|n| n.record.clone()),
         }
     }
 }
@@ -524,8 +668,33 @@ impl RecordingGuest {
 
 impl Guest for RecordingGuest {
     fn step(&mut self, state: &mut DrawState, input: FrameInput, frame: u64) -> Result<(), Fault> {
-        self.recorder.borrow_mut().record(input);
-        self.inner.step(state, input, frame)
+        let admitted = match &state.net {
+            Some(net) => {
+                let mut r = self.recorder.borrow_mut();
+                r.enable_net(&NetEnv {
+                    permitted: net.permitted,
+                    invite: net.invite.clone(),
+                });
+                r.record(input);
+                Some(net.admitted.clone())
+            }
+            None => {
+                self.recorder.borrow_mut().record(input);
+                None
+            }
+        };
+        let outcome = self.inner.step(state, input, frame);
+        if let Some(events) = admitted {
+            // A faulting frame's commands are discarded, so none are
+            // recorded for it.
+            let none = Vec::new();
+            let commands = match (&outcome, &state.net) {
+                (Ok(()), Some(net)) => &net.outbox,
+                _ => &none,
+            };
+            self.recorder.borrow_mut().record_net(&events, commands);
+        }
+        outcome
     }
 
     fn state(&mut self, names: &[String]) -> Result<String, Fault> {
@@ -558,7 +727,11 @@ mod tests {
         let mut inputs = vec![FrameInput::new(8); 30];
         inputs.extend(vec![FrameInput::NONE; 2]);
         inputs.push(FrameInput::new(63));
-        Transcript { header, inputs }
+        Transcript {
+            header,
+            inputs,
+            net: None,
+        }
     }
 
     #[test]
@@ -594,7 +767,8 @@ mod tests {
         let text = t.encode().unwrap();
         let code = |s: &str| Transcript::decode(s).unwrap_err().code;
         assert_eq!(code(""), TranscriptError::FORMAT);
-        assert_eq!(code("kuula-transcript 2\n{}"), TranscriptError::VERSION);
+        assert_eq!(code("kuula-transcript 3\n{}"), TranscriptError::VERSION);
+        assert_eq!(code("kuula-transcript 2\n{}"), TranscriptError::FORMAT);
         assert_eq!(code("nope 1\n{}"), TranscriptError::FORMAT);
         // Truncated: drop the last input run.
         let cut = text.trim_end_matches('\n').rsplit_once('\n').unwrap().0;
@@ -656,5 +830,37 @@ mod tests {
         r.record(FrameInput::NONE);
         assert!(r.overflowed());
         assert_eq!(r.frames(), MAX_FRAMES);
+    }
+
+    #[test]
+    fn a_net_overflow_drops_its_frame_and_ends_the_recording() {
+        let s = snap(&[("main.lua", b"")]);
+        let mut r = Recorder::new(Header::new(&s, 0, Vec::new()));
+        r.enable_net(&NetEnv {
+            permitted: true,
+            invite: None,
+        });
+        let big = Command::Send {
+            data: vec![0; crate::net::MAX_DATA],
+        };
+        let mut recorded = 0;
+        while !r.overflowed() {
+            r.record(FrameInput::new(1));
+            r.record_net(&[], &vec![big.clone(); crate::net::MAX_COMMANDS]);
+            recorded += 1;
+            assert!(recorded < 100_000, "the budget never filled");
+        }
+        // The overflowing frame is gone from both halves, and nothing
+        // is added after it: what is written is a prefix of the run.
+        let t = r.transcript();
+        assert_eq!(t.inputs.len() as u64, r.frames());
+        assert_eq!(r.frames(), recorded - 1);
+        assert_eq!(
+            t.net.as_ref().map(|n| n.frames.len() as u64),
+            Some(recorded - 1)
+        );
+        r.record(FrameInput::new(1));
+        r.record_net(&[], &[]);
+        assert_eq!(r.frames(), recorded - 1);
     }
 }

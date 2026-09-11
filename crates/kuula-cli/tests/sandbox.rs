@@ -4,7 +4,11 @@
 //! launched, and allowed all three when launched plainly, so the test
 //! proves the token and not the machine; the real worker still runs
 //! under it; and a launcher that cannot finish setting up ends the run
-//! with `sandbox_unavailable` and no orphan.
+//! with `sandbox_unavailable` and no orphan. All of that is Windows
+//! only; elsewhere the one test is that `--worker` runs plainly and
+//! says so.
+
+#![cfg(windows)]
 
 use std::net::TcpListener;
 use std::path::PathBuf;

@@ -3,17 +3,19 @@
 //! embedded so the binary is self-contained. The shell stays in this
 //! process; the carts it starts run in a worker unless `--in-process`.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use kuula_core::console::CartOpener;
+use kuula_core::net::NetEnv;
 use kuula_core::shell::{CartEntry, Settings};
 use kuula_core::{Console, Fault, Manifest, Snapshot, SnapshotLimits};
 use kuula_host_sdl::HostOptions;
 use kuula_lua::LuaGuest;
 
 use crate::remote::RemoteGuest;
-use crate::{CartRunner, EXIT_FAULT, EXIT_OK};
+use crate::{settings, CartRunner, EXIT_FAULT, EXIT_OK};
 
 /// The shell's source, checked in under `rom/`.
 pub const ROM_MAIN: &str = include_str!("../../../rom/main.lua");
@@ -77,7 +79,7 @@ fn open_cart(path: &Path) -> Result<Snapshot, Fault> {
     snap.map_err(|e| Fault::new(Fault::CART_READ_ERROR, &e.path, None, e.message))
 }
 
-pub fn run(carts: Option<&Path>, scale: u32, runner: CartRunner) -> u8 {
+pub fn run(carts: Option<&Path>, scale: Option<u32>, runner: CartRunner) -> u8 {
     let carts_dir: PathBuf = match carts {
         Some(p) => p.to_path_buf(),
         None if Path::new("carts").is_dir() => PathBuf::from("carts"),
@@ -105,25 +107,53 @@ pub fn run(carts: Option<&Path>, scale: u32, runner: CartRunner) -> u8 {
         None => Rc::new(LuaGuest::factory),
     };
     let preload = runner.preload();
+    // The persistent settings; `--scale` on the command line wins for
+    // this run.
+    let stored = settings::load(Settings::default());
+    let initial = Settings {
+        scale: scale.unwrap_or(stored.scale),
+        ..stored
+    };
+    let scale = initial.scale;
+    // Carts the shell starts get the persistent permission and no
+    // invite; the link is permitted the same way and flipped by the
+    // settings screen.
+    let mut link = crate::iroh_link();
+    link.set_permitted(initial.net);
+    // The settings screen flips the link; a console rebuilt after a
+    // shell fault must start from what the link holds now, not from
+    // the boot-time value, or the two disagree on permission.
+    let permitted = Rc::new(Cell::new(initial.net));
+    let permitted_now = permitted.clone();
 
     let mut make = || match LuaGuest::new_shell(ROM_MAIN, "rom/main.lua") {
-        Ok(shell) => Console::with_shell(
-            Box::new(shell),
-            entries.clone(),
-            Settings { scale, volume: 100 },
-            opener.clone(),
-            factory.clone(),
-            preload,
-        ),
+        Ok(shell) => {
+            let net = permitted_now.get();
+            let mut c = Console::with_shell(
+                Box::new(shell),
+                entries.clone(),
+                Settings { net, ..initial },
+                opener.clone(),
+                factory.clone(),
+                preload,
+            );
+            c.set_net_env(NetEnv {
+                permitted: net,
+                invite: None,
+            });
+            c
+        }
         Err(fault) => Console::faulted(fault),
     };
-    match kuula_host_sdl::run(
-        &mut make,
-        HostOptions {
-            scale,
-            title: "Kuula".to_string(),
-        },
-    ) {
+    let opts = HostOptions {
+        link: Some(link),
+        on_settings: Some(Box::new(move |s| {
+            permitted.set(s.net);
+            settings::save(&s)
+        })),
+        ..HostOptions::new(scale, "Kuula")
+    };
+    match kuula_host_sdl::run(&mut make, opts) {
         Err(e) => {
             eprintln!("host error: {e}");
             EXIT_FAULT

@@ -167,7 +167,7 @@ mod tests {
         );
     }
 
-    /// The brand roles in `docs/design/visual-language.md` are drawn from
+    /// The brand roles of the shell (ink, midnight, ivory, ...) are drawn from
     /// the locked system colours. Moving one moves the shell's identity.
     #[test]
     fn system_colours_carry_the_brand_roles() {

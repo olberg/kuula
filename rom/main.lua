@@ -21,7 +21,7 @@ local boot_frames = 0
 local last_fault = nil
 
 local MENU_ITEMS = { "resume", "restart", "settings", "quit to shell" }
-local SETTINGS_ITEMS = { "window scale", "master volume", "back" }
+local SETTINGS_ITEMS = { "window scale", "master volume", "networking", "back" }
 
 function _init()
   local w, h = stat("width"), stat("height")
@@ -190,6 +190,8 @@ local function update_settings()
   elseif item == "master volume" and delta ~= 0 then
     local v = s.volume + delta * 10
     if v >= 0 and v <= 100 then sys.set_volume(v) end
+  elseif item == "networking" and (delta ~= 0 or pressed(4)) then
+    sys.set_net(not s.net)
   end
   if pressed(5) or (pressed(4) and item == "back") then
     if sys.running() then
@@ -210,6 +212,7 @@ local function draw_settings()
   draw_list(SETTINGS_ITEMS, settings_index, x0 + 16, y0 + 18, function(item)
     if item == "window scale" then return "window scale  < " .. s.scale .. "x >" end
     if item == "master volume" then return "master volume < " .. s.volume .. " >" end
+    if item == "networking" then return "networking    < " .. (s.net and "on" or "off") .. " >" end
     return item
   end)
 end

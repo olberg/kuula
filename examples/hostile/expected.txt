@@ -12,3 +12,5 @@ pattern budget_exceeded
 rep budget_exceeded
 finalizer runtime_error
 draw budget_exceeded
+net_flood budget_exceeded
+net_ticket runtime_error

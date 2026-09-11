@@ -2,6 +2,7 @@
 //! that arrived with them.
 
 use super::{cart, console, pixel, run};
+use crate::api::Price;
 use crate::LuaGuest;
 use kuula_core::assets::encode_indexed_png;
 use kuula_core::palette::DEFAULT_PALETTE;
@@ -563,4 +564,64 @@ fn preloaded_assets_are_the_same_buffers_load_returns() {
     ok(&c);
     assert_eq!(c.draw_state().res.ledger().used(), 128, "no second decode");
     assert_eq!(pixel(&c, 0, 0), 3);
+}
+
+/// Each pricing family of the generated reference, measured through
+/// the meter: the descriptors say what a call costs, this says the
+/// binding charges it.
+#[test]
+fn priced_families_charge_what_the_reference_says() {
+    let src = "\
+function _init()
+  cls(0)
+  local function delta(f)
+    local a = stat('cpu_cycles')
+    f()
+    return stat('cpu_cycles') - a - 1
+  end
+  local s
+  local sheet_first = delta(function() s = load_sheet('tiles') end)
+  local sheet_again = delta(function() load_sheet('tiles') end)
+  sheet(s)
+  local m = load_map('level')
+  local map_cost = delta(function() map(m, 0, 0, 100, 100, 2, 2) end)
+  local text_cost = delta(function() print('AB', 0, 0, 7) end)
+  local b
+  local buf_cost = delta(function() b = buf('u8', 64, 64) end)
+  local fill_cost = delta(function() b:fill(1) end)
+  local copy_cost = delta(function() b:copy(s, 0, 0, 16, 8, 0, 0) end)
+  local line = string.rep('x', 80)
+  local log_cost = delta(function() print(line) end)
+  local t = {8, 7, 6, 5, 4, 3, 2, 1}
+  local sort_cost = delta(function() table.sort(t) end)
+  local ink = 0
+  for y = 0, 5 do for x = 0, 7 do if pget(x, y) == 7 then ink = ink + 1 end end end
+  log(sheet_first, sheet_again, map_cost, text_cost, ink, fill_cost, copy_cost, log_cost, sort_cost, buf_cost)
+end
+";
+    let mut c = gfx_console(src);
+    run(&mut c, 1);
+    ok(&c);
+    // The measured `print(line)` is the first log line; the numbers
+    // are the last.
+    let log = c.output().log.to_vec();
+    let n: Vec<u64> = log[1].split('\t').map(|p| p.parse().unwrap()).collect();
+    assert_eq!(n[0], 1 + 1 + 128 / 8, "load_sheet decodes 128 bytes");
+    assert_eq!(n[0], Price::asset(Some(128)), "as the reference says");
+    assert_eq!(n[1], 1, "a live sheet costs one cycle");
+    assert_eq!(n[1], Price::asset(None), "as the reference says");
+    assert_eq!(n[9], 1 + 1 + 4096 / 128, "buf: accepted, then by bytes");
+    assert_eq!(
+        n[9],
+        Price::Alloc.formula().unwrap().eval(&[4096]),
+        "as the reference says"
+    );
+    // Three of the four cells draw, 64 pixels each, 2 cycles per cell.
+    assert_eq!(n[2], 4 * 2 + 1 + 3 * 64 / 3, "map");
+    assert_eq!(n[3], 2 + n[4] / 3, "print draws two characters");
+    assert!(n[4] > 0, "the glyphs drew something");
+    assert_eq!(n[5], 1 + 4096 / 128, "fill by bytes");
+    assert_eq!(n[6], 1 + 128 / 128, "copy by bytes");
+    assert_eq!(n[7], 1 + 80 / 8, "log line by bytes");
+    assert_eq!(n[8], 1 + 8 * 4, "sort n log2 n");
 }

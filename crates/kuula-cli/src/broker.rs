@@ -6,6 +6,8 @@
 //! everything it sends back as hostile input. If the token or the job
 //! cannot be set up the run ends with `sandbox_unavailable`;
 //! `--no-sandbox` is the explicit, warned, plain launch for debugging.
+//! Off Windows there is no token, so the worker is a plain, warned
+//! child process: still a separate process, not an OS sandbox.
 //!
 //! Replies are read on a thread so every wait has a deadline: a worker
 //! that stops answering is killed and the run ends with
@@ -19,6 +21,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use kuula_core::net::{Command as NetCommand, Event, NetEnv};
 use kuula_core::{Fault, FrameInput, Snapshot};
 use kuula_host_headless::{OwnedFrame, StepError, Stepper};
 
@@ -46,6 +49,11 @@ pub const WATCHDOG_HOOK: &str = "KUULA_TEST_WATCHDOG_MS";
 /// Line printed when `--no-sandbox` skips the token.
 pub const NO_SANDBOX_WARNING: &str =
     "warning: --no-sandbox: the worker runs without an AppContainer token";
+
+/// Line printed when the platform has no worker sandbox at all (anything
+/// but Windows): the worker still runs as a separate process, plainly.
+pub const NO_PLATFORM_SANDBOX_WARNING: &str =
+    "warning: no OS sandbox on this platform: the worker runs as a plain child process";
 
 /// The worker process: under the AppContainer launcher by default, a
 /// plain `std::process::Child` with `--no-sandbox`.
@@ -121,11 +129,14 @@ impl Worker {
     /// token and joins the job before its first instruction; any setup
     /// failure kills it and refuses the run with `sandbox_unavailable`.
     /// Without it (`--no-sandbox`) the job is still attached, but after
-    /// the child has started, and a warning line is printed.
+    /// the child has started, and a warning line is printed. Off Windows
+    /// there is no token to take (`sandbox::AVAILABLE`), so `sandboxed`
+    /// launches plainly too, behind its own warning line, rather than
+    /// refusing every worker on the platform.
     pub fn spawn(exe: &Path, sandboxed: bool) -> Result<Worker, StepError> {
         let env = sandbox::minimal_env();
         let (child, stdin, stdout, job): (Process, Box<dyn Write>, Box<dyn Read + Send>, _) =
-            if sandboxed {
+            if sandboxed && sandbox::AVAILABLE {
                 let mut job = None;
                 let spawned = sandbox::spawn(exe, &["worker"], &env, |child| {
                     job = Some(job::Job::new_and_assign(JobTarget::Sandboxed(child))?);
@@ -142,7 +153,11 @@ impl Worker {
                     job,
                 )
             } else {
-                eprintln!("{NO_SANDBOX_WARNING}");
+                if sandboxed {
+                    eprintln!("{NO_PLATFORM_SANDBOX_WARNING}");
+                } else {
+                    eprintln!("{NO_SANDBOX_WARNING}");
+                }
                 let mut cmd = Command::new(exe);
                 cmd.arg("worker")
                     .stdin(Stdio::piped())
@@ -244,11 +259,18 @@ impl Worker {
         }
     }
 
-    /// Send the cart and its save slots and wait for the screen size.
-    pub fn load(&mut self, snapshot: &Snapshot, saves: Saves) -> Result<(u32, u32), StepError> {
+    /// Send the cart, its save slots and the networking environment,
+    /// and wait for the screen size.
+    pub fn load(
+        &mut self,
+        snapshot: &Snapshot,
+        saves: Saves,
+        net: NetEnv,
+    ) -> Result<(u32, u32), StepError> {
         self.send(&Message::Load {
             snapshot: snapshot.clone(),
             saves,
+            net,
         })?;
         match self.receive(self.load_timeout)? {
             Message::Ready { width, height } => Ok((width, height)),
@@ -268,24 +290,32 @@ impl Worker {
         self.step_timeout
     }
 
-    /// Send one frame's input; the reply is collected by `poll_frame`.
-    pub fn send_step(&mut self, input: FrameInput) -> Result<(), StepError> {
-        self.send(&Message::Step(input))
+    /// Send one frame's input and network events; the reply is
+    /// collected by `poll_frame`.
+    pub fn send_step(&mut self, input: FrameInput, events: Vec<Event>) -> Result<(), StepError> {
+        self.send(&Message::Step { input, events })
     }
 
     /// Wait up to `timeout` for the frame of the step in flight.
     /// `Ok(None)` means it has not arrived yet, which is not a failure:
     /// the caller decides when the watchdog is up (`watchdog_expired`).
     /// A malformed or unexpected reply kills the worker.
-    pub fn poll_frame(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Option<(OwnedFrame, Saves)>, StepError> {
+    pub fn poll_frame(&mut self, timeout: Duration) -> Result<Option<Reply>, StepError> {
         if self.dead {
             return Err(worker_error("worker is gone"));
         }
         match self.replies.recv_timeout(timeout) {
-            Ok(Ok(Message::Frame { frame, saves })) => Ok(Some((frame, saves))),
+            Ok(Ok(Message::Frame {
+                frame,
+                saves,
+                commands,
+                net_room,
+            })) => Ok(Some(Reply {
+                frame,
+                saves,
+                commands,
+                net_room: net_room as usize,
+            })),
             Ok(Ok(Message::Error { code, message })) => Err(StepError { code, message }),
             Ok(Ok(other)) => {
                 self.kill();
@@ -345,14 +375,23 @@ impl Drop for Worker {
     }
 }
 
+/// What one `Frame` reply carried.
+pub struct Reply {
+    pub frame: OwnedFrame,
+    pub saves: Saves,
+    pub commands: Vec<NetCommand>,
+    pub net_room: usize,
+}
+
 impl Stepper for Worker {
-    /// One synchronous step under the full watchdog; the saves the frame
-    /// carried are dropped, since a bare stepper has no store.
+    /// One synchronous step under the full watchdog; the saves and the
+    /// commands the frame carried are dropped, since a bare stepper has
+    /// no store and no link.
     fn step(&mut self, input: FrameInput) -> Result<OwnedFrame, StepError> {
-        self.send_step(input)?;
+        self.send_step(input, Vec::new())?;
         let timeout = self.step_timeout;
         match self.poll_frame(timeout)? {
-            Some((frame, _saves)) => Ok(frame),
+            Some(reply) => Ok(reply.frame),
             None => Err(self.watchdog_expired(timeout)),
         }
     }
@@ -361,7 +400,7 @@ impl Stepper for Worker {
 fn tag_name(m: &Message) -> &'static str {
     match m {
         Message::Load { .. } => "Load",
-        Message::Step(_) => "Step",
+        Message::Step { .. } => "Step",
         Message::Stop => "Stop",
         Message::Ready { .. } => "Ready",
         Message::Frame { .. } => "Frame",

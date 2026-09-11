@@ -43,6 +43,9 @@ pub struct DrawState {
     /// The data behind `sys`, present only in the shell's state
     ///. A cart's state has none.
     pub sys: Option<crate::shell::SysState>,
+    /// The networking state, present only for a cart whose manifest
+    /// declares `services = ["net"]`; the `net` table reads it.
+    pub net: Option<crate::net::NetState>,
     width: u32,
     height: u32,
 }
@@ -76,6 +79,7 @@ impl DrawState {
             audio: audio::Mixer::new(),
             saves: Box::new(MemoryStore::new()),
             sys: None,
+            net: None,
             width,
             height,
         }

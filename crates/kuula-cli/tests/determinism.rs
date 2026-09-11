@@ -65,6 +65,42 @@ fn hello_cart_hash_is_stable() {
     );
 }
 
+/// The recorded pair of `examples/netbuttons` (see `net_cart.rs`)
+/// replays through the binary, with no peer and no endpoint, to the
+/// per-frame hashes each side produced when it was recorded.
+#[test]
+fn the_netbuttons_pair_replays_to_its_recorded_hashes() {
+    let dir = example("netbuttons");
+    let replay = dir.join("replay");
+    for side in ["host", "join"] {
+        let out =
+            std::env::temp_dir().join(format!("kuula-netbuttons-{side}-{}", std::process::id()));
+        let run = std::process::Command::new(env!("CARGO_BIN_EXE_kuula"))
+            .arg("run")
+            .arg(&dir)
+            .arg("--headless")
+            .arg("--replay")
+            .arg(replay.join(format!("{side}.kr")))
+            .arg("--out")
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "{side}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let produced = std::fs::read_to_string(out.join("hashes.txt")).unwrap();
+        let recorded = std::fs::read_to_string(replay.join(format!("{side}-hashes.txt"))).unwrap();
+        assert_eq!(
+            produced, recorded,
+            "{side}: the replay diverged from the recording"
+        );
+        let _ = std::fs::remove_dir_all(out);
+    }
+}
+
 #[test]
 fn two_runs_produce_the_same_hash() {
     let run = || {

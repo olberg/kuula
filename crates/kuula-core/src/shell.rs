@@ -31,6 +31,9 @@ pub struct Settings {
     pub scale: u32,
     /// Master volume, 0 to 100.
     pub volume: u32,
+    /// Whether carts the shell starts may use the network: the
+    /// persistent half of the permission gate.
+    pub net: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +41,7 @@ impl Default for Settings {
         Settings {
             scale: 2,
             volume: 100,
+            net: false,
         }
     }
 }
@@ -50,6 +54,9 @@ pub enum SysRequest {
     Restart,
     SetScale(u32),
     SetVolume(u32),
+    /// Grant or withdraw networking for the running cart and the ones
+    /// after it; the host flips its link and persists the setting.
+    SetNet(bool),
     Paused(bool),
 }
 

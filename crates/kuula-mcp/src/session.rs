@@ -10,11 +10,16 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use kuula_core::transcript::{Header, Transcript};
+use kuula_core::net::{Link, NetEnv, Transport};
+use kuula_core::transcript::{Header, NetRecord, Transcript};
 use kuula_core::{
-    Console, Fault, FrameInput, FrameProfile, MemoryStore, Recorder, RecordingGuest, SaveStore,
-    SharedRecorder, Snapshot, SnapshotLimits,
+    Console, Fault, FrameInput, FrameProfile, MemoryStore, Recorder, RecordingGuest, ReplayGuest,
+    SaveStore, SharedRecorder, Snapshot, SnapshotLimits,
 };
+
+/// Builds a transport for a console that hosts or joins; injected by
+/// the binary, since this crate opens no socket.
+pub type TransportFactory = Rc<dyn Fn() -> Box<dyn Transport>>;
 use kuula_host_headless::OwnedFrame;
 use kuula_lua::LuaGuest;
 
@@ -89,10 +94,12 @@ pub struct Live {
     fault_frame: Option<u64>,
     /// The inputs the cart saw, when `run` asked for a recording.
     recorder: Option<SharedRecorder>,
+    /// The network link, for a console `run` started with `net`.
+    link: Option<Link>,
 }
 
 impl Live {
-    fn new(console: Console, recorder: Option<SharedRecorder>) -> Live {
+    fn new(console: Console, recorder: Option<SharedRecorder>, link: Option<Link>) -> Live {
         Live {
             console,
             logs: VecDeque::new(),
@@ -100,7 +107,15 @@ impl Live {
             queued: VecDeque::new(),
             fault_frame: None,
             recorder,
+            link,
         }
+    }
+
+    /// The cart's networking status and ticket, if it has the service.
+    pub fn net(&self) -> Option<(String, Option<String>)> {
+        self.console
+            .net_state()
+            .map(|n| (n.status.as_str().to_string(), n.ticket.clone()))
     }
 
     /// The transcript so far, when recording, and whether it holds
@@ -134,7 +149,13 @@ impl Live {
     /// Step one frame with `input`, recording its log and profile.
     pub fn step(&mut self, input: FrameInput) -> Stepped {
         let already_faulted = !self.is_running();
-        let out = self.console.step(input);
+        match self.link.as_mut() {
+            Some(link) => self.console.step_linked(link, input),
+            None => {
+                self.console.step(input);
+            }
+        }
+        let out = self.console.output();
         let frame = out.frame;
         let log: Vec<LogLine> = out
             .log
@@ -241,15 +262,30 @@ pub struct Session {
     root: PathBuf,
     consoles: HashMap<String, Live>,
     next_handle: u64,
+    transports: Option<TransportFactory>,
 }
 
 impl Session {
     pub fn new(root: PathBuf) -> Session {
+        Session::with_transports(root, None)
+    }
+
+    pub fn with_transports(root: PathBuf, transports: Option<TransportFactory>) -> Session {
         Session {
             root,
             consoles: HashMap::new(),
             next_handle: 1,
+            transports,
         }
+    }
+
+    /// A permitted link over a fresh transport, or `None` when the
+    /// server was started without networking.
+    pub fn link(&self) -> Option<Link> {
+        let make = self.transports.clone()?;
+        let mut link = Link::new(Box::new(move || make()));
+        link.set_permitted(true);
+        Some(link)
     }
 
     pub fn root(&self) -> &Path {
@@ -308,17 +344,20 @@ impl Session {
     /// that faulted at load is still returned, faulted, like the CLI.
     pub fn build(&self, cart: &str) -> Result<Console, ToolError> {
         let snap = self.snapshot(cart)?;
-        Session::build_with(snap, false, &[]).map(|(c, _)| c)
+        Session::build_with(snap, false, &[], NetEnv::default(), None).map(|(c, _)| c)
     }
 
     /// Build a console from a snapshot already taken (so a caller that
     /// checked the tree builds from the same read), with an in-memory
-    /// save store seeded from `saves` (a replay's initial slots) and,
-    /// with `record`, a recorder of every input the cart sees.
+    /// save store seeded from `saves` (a replay's initial slots), the
+    /// networking environment `net`, the network records of a replay
+    /// and, with `record`, a recorder of every input the cart sees.
     pub fn build_with(
         snap: Snapshot,
         record: bool,
         saves: &[(u8, Vec<u8>)],
+        net: NetEnv,
+        replay: Option<NetRecord>,
     ) -> Result<(Console, Option<SharedRecorder>), ToolError> {
         let mut store = MemoryStore::from_slots(saves)
             .map_err(|e| ToolError::new("invalid_transcript", format!("initial saves: {e}")))?;
@@ -331,22 +370,28 @@ impl Session {
         });
         let mut console = Console::new(
             Rc::new(snap),
-            RecordingGuest::factory(LuaGuest::factory, recorder.clone()),
+            ReplayGuest::factory(
+                RecordingGuest::factory(LuaGuest::factory, recorder.clone()),
+                replay,
+            ),
         );
         console.set_save_store(Box::new(store));
+        console.set_net_env(net);
         Ok((console, recorder))
     }
 
     /// Mint a handle for a console.
     pub fn open(&mut self, console: Console) -> Result<String, ToolError> {
-        self.open_with(console, None)
+        self.open_with(console, None, None)
     }
 
-    /// Mint a handle for a console that may be recording.
+    /// Mint a handle for a console that may be recording and may have
+    /// a network link.
     pub fn open_with(
         &mut self,
         console: Console,
         recorder: Option<SharedRecorder>,
+        link: Option<Link>,
     ) -> Result<String, ToolError> {
         if self.consoles.len() >= MAX_CONSOLES {
             return Err(ToolError::new(
@@ -357,7 +402,7 @@ impl Session {
         let handle = format!("c{}", self.next_handle);
         self.next_handle += 1;
         self.consoles
-            .insert(handle.clone(), Live::new(console, recorder));
+            .insert(handle.clone(), Live::new(console, recorder, link));
         Ok(handle)
     }
 

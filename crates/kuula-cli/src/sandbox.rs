@@ -34,6 +34,10 @@ use std::fs::File;
 /// The AppContainer profile the worker runs under.
 pub const PROFILE_NAME: &str = "kuula-worker";
 
+/// Whether this platform has a worker sandbox at all. Only Windows does;
+/// elsewhere the broker launches the worker plainly and says so.
+pub const AVAILABLE: bool = cfg!(windows);
+
 /// Test hook: when set, setup fails deliberately after the child exists
 /// suspended, so the fail-closed path (terminate, report) is exercised.
 pub const FAIL_HOOK: &str = "KUULA_TEST_SANDBOX_FAIL";
@@ -659,8 +663,9 @@ mod imp {
 mod imp {
     use std::path::Path;
 
-    /// There is no AppContainer off Windows; `spawn` always fails and
-    /// the broker reports `sandbox_unavailable`.
+    /// There is no AppContainer off Windows: `AVAILABLE` is false, the
+    /// broker never calls `spawn` here, and if it did the run would end
+    /// with `sandbox_unavailable` rather than run unsandboxed by accident.
     pub struct Child(());
 
     impl Child {

@@ -150,6 +150,90 @@ fn record_then_replay_reproduces_the_hashes() {
     assert!(hash_line(&short.stdout).starts_with("frames 10 "));
 }
 
+/// A cart with the `net` service records format version 2 even when it
+/// runs offline; the replay reproduces it, `--worker` refuses a version
+/// 2 replay, and a transcript whose commands the cart does not issue
+/// ends with `transcript_divergence` on the frame where they differ.
+#[test]
+fn a_networked_cart_records_version_2_and_replays_or_diverges() {
+    let s = Scratch::new();
+    let cart = example("netbuttons");
+    let cart = cart.to_str().unwrap();
+    let script = s.path("in.json");
+    std::fs::write(
+        &script,
+        r#"[{"frames": 5}, {"frames": 2, "buttons": ["a"]}, {"frames": 8}]"#,
+    )
+    .unwrap();
+    let kr = s.path("offline.kr");
+    let recorded = run(&[
+        "run",
+        cart,
+        "--headless",
+        "--frames",
+        "15",
+        "--input",
+        &script,
+        "--record",
+        &kr,
+    ]);
+    assert_eq!(
+        recorded.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    let text = std::fs::read_to_string(&kr).unwrap();
+    assert!(
+        text.starts_with(
+            "kuula-transcript 2
+"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("net = false"), "{text}");
+    assert!(text.contains("services = { [1] = \"net\" }"), "{text}");
+    // Offline, the host request is denied locally: no events, no
+    // commands, so no network records at all.
+    assert!(!text.contains("{ at = "), "{text}");
+    let replayed = run(&["run", cart, "--headless", "--replay", &kr]);
+    assert_eq!(replayed.status.code(), Some(0));
+    assert_eq!(hash_line(&recorded.stdout), hash_line(&replayed.stdout));
+    let worker = run(&["run", cart, "--headless", "--replay", &kr, "--worker"]);
+    assert_eq!(worker.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&worker.stderr).contains("in process"));
+
+    // The checked-in host recording, with one recorded send altered:
+    // the cart issues the original, and the replay stops there.
+    let fixture = example("netbuttons").join("replay").join("host.kr");
+    let host = std::fs::read_to_string(&fixture).unwrap();
+    let line = host
+        .lines()
+        .find(|l| l.contains("op = \"send\""))
+        .expect("a frame with a send");
+    let at: u64 = line
+        .split("{ at = ")
+        .nth(1)
+        .and_then(|r| r.split(',').next())
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap();
+    let altered = line.replacen("op = \"send\"", "op = \"leave\"", 1);
+    let broken = s.path("broken.kr");
+    std::fs::write(&broken, host.replacen(line, &altered, 1)).unwrap();
+    let diverged = run(&["run", cart, "--headless", "--replay", &broken]);
+    assert_eq!(diverged.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&diverged.stderr);
+    assert!(
+        stderr.contains(&format!("transcript_divergence net: frame {at}:")),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&diverged.stdout);
+    assert!(
+        stdout.contains(&format!("frames {at} ")),
+        "the frames before the divergence still hash: {stdout}"
+    );
+}
+
 #[test]
 fn replay_refuses_another_cart_unless_told() {
     let s = Scratch::new();

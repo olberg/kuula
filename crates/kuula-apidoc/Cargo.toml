@@ -1,0 +1,13 @@
+[package]
+name = "kuula-apidoc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generates the reference sections of docs/api.md from the Lua binding descriptors."
+
+[[bin]]
+name = "kuula-apidoc"
+path = "src/main.rs"
+
+[dependencies]
+kuula-lua.workspace = true

@@ -61,6 +61,12 @@ impl Server {
         }
     }
 
+    pub fn with_transports(root: PathBuf, transports: Option<crate::TransportFactory>) -> Server {
+        Server {
+            session: Session::with_transports(root, transports),
+        }
+    }
+
     pub fn session(&self) -> &Session {
         &self.session
     }
@@ -271,8 +277,9 @@ pub fn serve(
     mut input: impl BufRead,
     mut output: impl Write,
     root: PathBuf,
+    transports: Option<crate::TransportFactory>,
 ) -> std::io::Result<()> {
-    let mut server = Server::new(root);
+    let mut server = Server::with_transports(root, transports);
     let mut line = String::new();
     loop {
         line.clear();

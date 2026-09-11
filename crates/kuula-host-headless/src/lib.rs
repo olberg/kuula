@@ -9,7 +9,9 @@ pub mod hash;
 pub mod script;
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
+use kuula_core::net::{Event, Link};
 use kuula_core::{
     Category, Console, ConsoleState, Fault, FrameInput, FrameProfile, CATEGORY_COUNT, PALETTE_SIZE,
 };
@@ -59,20 +61,113 @@ impl std::fmt::Display for StepError {
 
 impl std::error::Error for StepError {}
 
+/// The console's current frame, owned.
+pub fn owned_frame(console: &Console) -> OwnedFrame {
+    let out = console.output();
+    OwnedFrame {
+        frame: out.frame,
+        width: out.width,
+        height: out.height,
+        pixels: out.screen.to_vec(),
+        palette: *out.palette,
+        log: out.log.to_vec(),
+        profile: out.profile.clone(),
+        audio: out.audio.to_vec(),
+        state: console.state().clone(),
+    }
+}
+
+/// One step with the network events the host offers, as an owned
+/// frame. The worker and the in-process stepper both go through here.
+pub fn step_console(console: &mut Console, input: FrameInput, events: Vec<Event>) -> OwnedFrame {
+    console.step_with(input, events);
+    owned_frame(console)
+}
+
 impl Stepper for Console {
     fn step(&mut self, input: FrameInput) -> Result<OwnedFrame, StepError> {
-        let out = Console::step(self, input);
-        Ok(OwnedFrame {
-            frame: out.frame,
-            width: out.width,
-            height: out.height,
-            pixels: out.screen.to_vec(),
-            palette: *out.palette,
-            log: out.log.to_vec(),
-            profile: out.profile.clone(),
-            audio: out.audio.to_vec(),
-            state: self.state().clone(),
-        })
+        Ok(step_console(self, input, Vec::new()))
+    }
+}
+
+/// Told the ticket when hosting begins.
+type OnHosting<'a> = Box<dyn FnMut(&str) + 'a>;
+
+/// A console stepped through a network [`Link`]: what a headless run
+/// with `--net` uses. Reports the ticket when hosting begins. Wrap it
+/// in [`Paced`] to hold it to real time.
+pub struct Linked<'a> {
+    console: &'a mut Console,
+    link: &'a mut Link,
+    on_hosting: Option<OnHosting<'a>>,
+}
+
+impl<'a> Linked<'a> {
+    pub fn new(console: &'a mut Console, link: &'a mut Link) -> Linked<'a> {
+        Linked {
+            console,
+            link,
+            on_hosting: None,
+        }
+    }
+
+    /// Called with the ticket when a `hosting` event is admitted.
+    pub fn on_hosting(mut self, f: impl FnMut(&str) + 'a) -> Linked<'a> {
+        self.on_hosting = Some(Box::new(f));
+        self
+    }
+}
+
+impl Stepper for Linked<'_> {
+    fn step(&mut self, input: FrameInput) -> Result<OwnedFrame, StepError> {
+        let mut events = Vec::new();
+        self.link.poll(&mut events, self.console.net_room());
+        if let Some(f) = self.on_hosting.as_mut() {
+            for e in &events {
+                if let Event::Hosting { ticket } = e {
+                    f(ticket);
+                }
+            }
+        }
+        let frame = step_console(self.console, input, events);
+        let commands = self.console.take_net_commands();
+        if !commands.is_empty() {
+            self.link.push(commands);
+        }
+        Ok(frame)
+    }
+}
+
+/// A stepper held to real time: sleeps so steps come no faster than
+/// one per `frame`, then steps the inner one. How a headless host
+/// waits for a human peer. Host-side only, never seen by the cart; put
+/// a timer inside it, not around it, so `--timing` measures the work
+/// and not the wait.
+pub struct Paced<'a> {
+    inner: &'a mut dyn Stepper,
+    frame: Duration,
+    next: Option<Instant>,
+}
+
+impl<'a> Paced<'a> {
+    pub fn new(inner: &'a mut dyn Stepper, frame: Duration) -> Paced<'a> {
+        Paced {
+            inner,
+            frame,
+            next: None,
+        }
+    }
+}
+
+impl Stepper for Paced<'_> {
+    fn step(&mut self, input: FrameInput) -> Result<OwnedFrame, StepError> {
+        let now = Instant::now();
+        let due = self.next.unwrap_or(now);
+        if due > now {
+            std::thread::sleep(due - now);
+        }
+        self.next = Some(due.max(now - self.frame) + self.frame);
+        self.inner.step(input)
     }
 }
 

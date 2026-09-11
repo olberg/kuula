@@ -26,7 +26,9 @@
 
 use std::ffi::{c_char, c_int, CStr};
 
-use mlua::{Lua, Result, Table};
+use crate::api::reg::Reg;
+use crate::api::{Group, Price, Scope, Sig};
+use mlua::Result;
 
 /// Lua's own `^`: `b == 2` is a multiplication, everything else a `pow`.
 #[no_mangle]
@@ -126,36 +128,31 @@ fn parse_width(fmt: &[u8]) -> (bool, usize) {
 
 /// Replace the `math` table's transcendental functions. Called once per
 /// state from the bindings, next to the `randomseed` replacement.
-pub fn install(lua: &Lua) -> Result<()> {
-    let math: Table = lua.globals().get("math")?;
-    math.set("sin", lua.create_function(|_, x: f64| Ok(libm::sin(x)))?)?;
-    math.set("cos", lua.create_function(|_, x: f64| Ok(libm::cos(x)))?)?;
-    math.set("tan", lua.create_function(|_, x: f64| Ok(libm::tan(x)))?)?;
-    math.set("asin", lua.create_function(|_, x: f64| Ok(libm::asin(x)))?)?;
-    math.set("acos", lua.create_function(|_, x: f64| Ok(libm::acos(x)))?)?;
-    math.set("exp", lua.create_function(|_, x: f64| Ok(libm::exp(x)))?)?;
-    math.set(
-        "atan",
-        lua.create_function(|_, (y, x): (f64, Option<f64>)| Ok(libm::atan2(y, x.unwrap_or(1.0))))?,
-    )?;
-    math.set(
-        "log",
-        lua.create_function(|_, (x, base): (f64, Option<f64>)| {
-            // Lua's own special cases for the two common bases.
-            Ok(match base {
-                None => libm::log(x),
-                Some(b) => {
-                    if b == 2.0 {
-                        libm::log2(x)
-                    } else if b == 10.0 {
-                        libm::log10(x)
-                    } else {
-                        libm::log(x) / libm::log(b)
-                    }
+pub(crate) fn install(reg: &mut Reg<'_>) -> Result<()> {
+    reg.function(&SIN, |_, x: f64| Ok(libm::sin(x)))?;
+    reg.function(&COS, |_, x: f64| Ok(libm::cos(x)))?;
+    reg.function(&TAN, |_, x: f64| Ok(libm::tan(x)))?;
+    reg.function(&ASIN, |_, x: f64| Ok(libm::asin(x)))?;
+    reg.function(&ACOS, |_, x: f64| Ok(libm::acos(x)))?;
+    reg.function(&EXP, |_, x: f64| Ok(libm::exp(x)))?;
+    reg.function(&ATAN, |_, (y, x): (f64, Option<f64>)| {
+        Ok(libm::atan2(y, x.unwrap_or(1.0)))
+    })?;
+    reg.function(&LOG, |_, (x, base): (f64, Option<f64>)| {
+        // Lua's own special cases for the two common bases.
+        Ok(match base {
+            None => libm::log(x),
+            Some(b) => {
+                if b == 2.0 {
+                    libm::log2(x)
+                } else if b == 10.0 {
+                    libm::log10(x)
+                } else {
+                    libm::log(x) / libm::log(b)
                 }
-            })
-        })?,
-    )?;
+            }
+        })
+    })?;
     // A reference from Rust keeps the exported symbols in the link even
     // on linkers that only pull archive members for symbols already
     // undefined (GNU ld); the C objects of Lua come later on the line.
@@ -169,6 +166,27 @@ pub fn install(lua: &Lua) -> Result<()> {
     );
     Ok(())
 }
+
+macro_rules! routed {
+    ($id:ident, $name:literal, $call:literal) => {
+        binding!($id {
+            name: $name,
+            scope: Scope::Std(Some("math")),
+            group: Group::Numeric,
+            sigs: &[Sig::new($call, "as Lua, computed by the pinned libm")],
+            price: Price::Native,
+        });
+    };
+}
+
+routed!(SIN, "sin", "math.sin(x)");
+routed!(COS, "cos", "math.cos(x)");
+routed!(TAN, "tan", "math.tan(x)");
+routed!(ASIN, "asin", "math.asin(x)");
+routed!(ACOS, "acos", "math.acos(x)");
+routed!(EXP, "exp", "math.exp(x)");
+routed!(ATAN, "atan", "math.atan(y, [x])");
+routed!(LOG, "log", "math.log(x, [base])");
 
 #[cfg(test)]
 mod tests {

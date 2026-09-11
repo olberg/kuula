@@ -22,7 +22,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub use protocol::{serve, Server, MAX_LINE_BYTES, PROTOCOL_VERSION};
-pub use session::{Session, ToolError, MAX_CONSOLES};
+pub use session::{Session, ToolError, TransportFactory, MAX_CONSOLES};
 
 /// The API reference, served as `kuula://docs/api.md`.
 pub const API_MD: &str = include_str!("../../../docs/api.md");
@@ -31,8 +31,13 @@ pub const API_MD: &str = include_str!("../../../docs/api.md");
 pub const SKILL_MD: &str = include_str!("../../../docs/skill.md");
 
 /// Serve on the process's stdin and stdout until stdin closes. Cart
-/// paths are resolved under `root`, or the current directory.
-pub fn run_stdio(root: Option<PathBuf>) -> std::io::Result<()> {
+/// paths are resolved under `root`, or the current directory. With
+/// `transports`, the `run` tool's `net` argument can host or join;
+/// without, it is refused (this crate opens no socket itself).
+pub fn run_stdio(
+    root: Option<PathBuf>,
+    transports: Option<TransportFactory>,
+) -> std::io::Result<()> {
     let root = match root {
         Some(r) => r,
         None => std::env::current_dir()?,
@@ -40,7 +45,7 @@ pub fn run_stdio(root: Option<PathBuf>) -> std::io::Result<()> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let result = serve(stdin.lock(), &mut out, root);
+    let result = serve(stdin.lock(), &mut out, root, transports);
     out.flush()?;
     result
 }

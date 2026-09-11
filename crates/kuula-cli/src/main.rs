@@ -5,8 +5,12 @@
 //!   under the sandbox unless `--in-process`.
 //! - `kuula run <dir> --headless [--frames N] [--input script.json]
 //!   [--out dir/] [--worker [--no-sandbox]] [--record out.kr]
-//!   [--replay in.kr [--replay-any-cart]]` steps without a window and
-//!   writes PNG frames, per-frame hashes and a run summary.
+//!   [--replay in.kr [--replay-any-cart]] [--timing]` steps without a
+//!   window and writes PNG frames, per-frame hashes and a run summary.
+//! - `--net host` or `--net join <ticket>` on either form permits a
+//!   cart that declares `services = ["net"]` to use the network for
+//!   that run; a headless host prints `ticket: ...` and is paced to
+//!   real time so a peer can join it.
 //! - `kuula screenshot <dir> --out file.png [--frame N] [--input script]`
 //!   writes one frame.
 //! - `kuula build <dir> --out cart.zip` packs the served entries of a
@@ -14,16 +18,20 @@
 //!   `.zip` or `.cart` file as well as a directory.
 //! - `kuula worker` is the hidden child process behind the worker.
 //! - `kuula mcp [--root DIR]` serves the MCP tools on stdin/stdout.
+//! - `kuula net listen|join` is the hidden networking diagnostic
+//!   (`net_cmd`), the only path that opens a socket.
 //!
 //! Exit codes: 0 when the window is closed or the headless run finishes
 //! with the cart still running, 1 when the cart faulted or the worker
-//! failed, 2 on a usage error.
+//! failed, 2 on a usage error, 3 when `net` failed.
 
 mod broker;
 mod ipc;
+mod net_cmd;
 mod probe;
 mod remote;
 mod sandbox;
+mod settings;
 mod shell;
 mod worker;
 
@@ -31,15 +39,19 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 
+use std::time::Duration;
+
 use clap::{Parser, Subcommand};
-use kuula_core::transcript::{Header, Transcript, MAX_FILE_BYTES};
+use kuula_core::net::{Link, NetEnv, Transport};
+use kuula_core::transcript::{Header, NetRecord, Transcript, MAX_FILE_BYTES};
 use kuula_core::{
-    Console, FrameInput, Guest, MemoryStore, Preload, Recorder, RecordingGuest, SaveStore,
-    SharedRecorder, Snapshot, SnapshotLimits, WriteThroughStore,
+    Console, FrameInput, Guest, MemoryStore, Preload, Recorder, RecordingGuest, ReplayGuest,
+    SaveStore, SharedRecorder, Snapshot, SnapshotLimits, WriteThroughStore,
 };
-use kuula_host_headless::{InputScript, OwnedFrame, RunSummary};
+use kuula_host_headless::{InputScript, Linked, OwnedFrame, Paced, RunSummary, StepError, Stepper};
 use kuula_host_sdl::HostOptions;
 use kuula_lua::LuaGuest;
+use kuula_net::IrohTransport;
 
 use remote::{RemoteConfig, RemoteGuest};
 
@@ -104,6 +116,14 @@ enum Command {
         /// result then verifies nothing.
         #[arg(long, requires = "replay")]
         replay_any_cart: bool,
+        /// Permit networking for this run: `host`, or `join <ticket>`.
+        /// Only a cart that declares `services = ["net"]` can use it.
+        #[arg(long, num_args = 1..=2, value_names = ["MODE", "TICKET"], conflicts_with = "replay")]
+        net: Option<Vec<String>>,
+        /// Headless: print the median and maximum wall time of a step at
+        /// exit (host side only; never cart-visible).
+        #[arg(long)]
+        timing: bool,
     },
     /// Step a cart headless and write one frame as a PNG.
     Screenshot {
@@ -132,9 +152,9 @@ enum Command {
         /// examples/ when carts/ is missing).
         #[arg(long)]
         carts: Option<PathBuf>,
-        /// Window scale, 1 to 4.
-        #[arg(long, default_value_t = kuula_host_sdl::scale::DEFAULT_SCALE, value_parser = kuula_host_sdl::scale::parse)]
-        scale: u32,
+        /// Window scale, 1 to 4; the saved setting when absent.
+        #[arg(long, value_parser = kuula_host_sdl::scale::parse)]
+        scale: Option<u32>,
         /// Run carts in this process instead of a worker.
         #[arg(long)]
         in_process: bool,
@@ -153,6 +173,12 @@ enum Command {
     /// Internal: the worker process behind `run --worker`.
     #[command(hide = true)]
     Worker,
+    /// Internal: the networking diagnostic, `listen` and `join`.
+    #[command(hide = true)]
+    Net {
+        #[command(subcommand)]
+        command: net_cmd::NetCommand,
+    },
     /// Internal: the hostile probe behind the sandbox tests.
     #[command(hide = true)]
     SandboxProbe {
@@ -241,6 +267,80 @@ fn factory(runner: &CartRunner, recorder: Option<SharedRecorder>) -> Factory {
     }
 }
 
+/// How a run was permitted to use the network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NetMode {
+    Host,
+    Join(String),
+}
+
+impl NetMode {
+    /// `--net host` or `--net join <ticket>`.
+    fn parse(args: &[String]) -> Result<NetMode, String> {
+        match args {
+            [mode] if mode == "host" => Ok(NetMode::Host),
+            [mode, ticket] if mode == "join" => {
+                if ticket.len() > kuula_core::net::MAX_TICKET {
+                    return Err("the ticket is too long".into());
+                }
+                Ok(NetMode::Join(ticket.clone()))
+            }
+            [mode] if mode == "join" => Err("--net join needs a ticket".into()),
+            _ => Err("--net takes `host` or `join <ticket>`".into()),
+        }
+    }
+
+    fn env(&self) -> NetEnv {
+        NetEnv {
+            permitted: true,
+            invite: match self {
+                NetMode::Host => None,
+                NetMode::Join(t) => Some(t.clone()),
+            },
+        }
+    }
+}
+
+/// The link every networked run steps through: an Iroh transport built
+/// on the cart's first `host` or `join`, permitted from the start.
+fn iroh_link() -> Link {
+    let mut link = Link::new(Box::new(|| {
+        Box::new(IrohTransport::new(None)) as Box<dyn Transport>
+    }));
+    link.set_permitted(true);
+    link
+}
+
+/// A stepper that measures each step's wall time, for `--timing`.
+struct Timed<'a> {
+    inner: &'a mut dyn Stepper,
+    times: Vec<Duration>,
+}
+
+impl Stepper for Timed<'_> {
+    fn step(&mut self, input: FrameInput) -> Result<OwnedFrame, StepError> {
+        let t = std::time::Instant::now();
+        let out = self.inner.step(input);
+        self.times.push(t.elapsed());
+        out
+    }
+}
+
+fn timing_line(mut times: Vec<Duration>) -> String {
+    if times.is_empty() {
+        return "timing: no steps".to_string();
+    }
+    times.sort();
+    let median = times[times.len() / 2];
+    let max = times[times.len() - 1];
+    format!(
+        "timing: {} steps, median {:.3} ms, max {:.3} ms",
+        times.len(),
+        median.as_secs_f64() * 1000.0,
+        max.as_secs_f64() * 1000.0
+    )
+}
+
 /// The desktop save store for a cart: memory semantics for the cart,
 /// the file store keyed by the cart's path behind it. Without a save
 /// root the slots live in memory.
@@ -262,7 +362,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Shell {
         carts: None,
-        scale: kuula_host_sdl::scale::DEFAULT_SCALE,
+        scale: None,
         in_process: false,
         no_sandbox: false,
     });
@@ -281,8 +381,16 @@ fn main() -> ExitCode {
             record,
             replay,
             replay_any_cart,
+            net,
+            timing,
         } => {
-            let headless = headless || frames.is_some() || worker || profile || replay.is_some();
+            let headless =
+                headless || frames.is_some() || worker || profile || replay.is_some() || timing;
+            let net = match net.as_deref().map(NetMode::parse) {
+                None => None,
+                Some(Ok(mode)) => Some(mode),
+                Some(Err(e)) => return ExitCode::from(usage(&e)),
+            };
             if headless && in_process {
                 usage("--in-process applies to windowed runs; headless runs are in-process unless --worker")
             } else if no_sandbox && (if headless { !worker } else { in_process }) {
@@ -301,12 +409,14 @@ fn main() -> ExitCode {
                         record: record.as_deref(),
                         replay: replay.as_deref(),
                         replay_any_cart,
+                        net,
+                        timing,
                     }),
                 }
             } else {
                 match CartRunner::new(in_process, no_sandbox, true) {
                     Err(code) => code,
-                    Ok(runner) => run_window(&dir, scale, runner, record.as_deref()),
+                    Ok(runner) => run_window(&dir, scale, runner, record.as_deref(), net),
                 }
             }
         }
@@ -331,10 +441,17 @@ fn main() -> ExitCode {
                     record: None,
                     replay: None,
                     replay_any_cart: false,
+                    net: None,
+                    timing: false,
                 })
             }
         }
-        Command::Mcp { root } => match kuula_mcp::run_stdio(root) {
+        Command::Mcp { root } => match kuula_mcp::run_stdio(
+            root,
+            Some(std::rc::Rc::new(|| {
+                Box::new(IrohTransport::new(None)) as Box<dyn Transport>
+            })),
+        ) {
             Ok(()) => EXIT_OK,
             Err(e) => {
                 eprintln!("mcp: {e}");
@@ -352,6 +469,7 @@ fn main() -> ExitCode {
         },
         Command::Build { dir, out } => build(&dir, &out),
         Command::Worker => worker::main(),
+        Command::Net { command } => net_cmd::main(command),
         Command::SandboxProbe {
             read,
             write,
@@ -514,11 +632,22 @@ fn read_transcript(path: &Path, snap: &Snapshot, any_cart: bool) -> Result<Trans
     Ok(transcript)
 }
 
-fn run_window(dir: &Path, scale: u32, runner: CartRunner, record: Option<&Path>) -> u8 {
+fn run_window(
+    dir: &Path,
+    scale: u32,
+    runner: CartRunner,
+    record: Option<&Path>,
+    net: Option<NetMode>,
+) -> u8 {
     let snap = match snapshot(dir) {
         Ok(s) => s,
         Err(code) => return code,
     };
+    let env = net.as_ref().map(NetMode::env).unwrap_or_default();
+    let link = net.as_ref().map(|_| iroh_link());
+    if net.is_some() && !declares_net(&snap) {
+        eprintln!("note: --net given but the cart does not declare services = [\"net\"]");
+    }
     let title = format!(
         "Kuula - {}",
         dir.file_name().and_then(|s| s.to_str()).unwrap_or("cart")
@@ -550,9 +679,14 @@ fn run_window(dir: &Path, scale: u32, runner: CartRunner, record: Option<&Path>)
         let mut console =
             Console::new_with(snap.clone(), factory(&runner, this_run), runner.preload());
         console.set_save_store(store);
+        console.set_net_env(env.clone());
         console
     };
-    let outcome = match kuula_host_sdl::run(&mut make, HostOptions { scale, title }) {
+    let opts = HostOptions {
+        link,
+        ..HostOptions::new(scale, title)
+    };
+    let outcome = match kuula_host_sdl::run(&mut make, opts) {
         Err(e) => {
             eprintln!("host error: {e}");
             EXIT_FAULT
@@ -593,6 +727,17 @@ struct HeadlessRun<'a> {
     record: Option<&'a Path>,
     replay: Option<&'a Path>,
     replay_any_cart: bool,
+    net: Option<NetMode>,
+    timing: bool,
+}
+
+/// Whether the manifest declares the `net` service; a manifest that
+/// does not parse declares nothing (the console reports it).
+fn declares_net(snap: &Snapshot) -> bool {
+    snap.get(kuula_core::manifest::MANIFEST_FILE)
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .and_then(|t| kuula_core::Manifest::parse(t).ok())
+        .is_some_and(|m| m.has_service(kuula_core::Service::Net))
 }
 
 /// A headless run, in this process or through a worker, optionally
@@ -602,6 +747,7 @@ fn run_headless(run: HeadlessRun<'_>) -> u8 {
         Ok(s) => s,
         Err(code) => return code,
     };
+    let mut replay_net: Option<NetRecord> = None;
     let (inputs, mut store, frames) = match run.replay {
         Some(path) => {
             let transcript = match read_transcript(path, &snap, run.replay_any_cart) {
@@ -613,6 +759,10 @@ fn run_headless(run: HeadlessRun<'_>) -> u8 {
                 Err(e) => return usage(&format!("{}: initial saves: {e}", path.display())),
             };
             let frames = run.frames.unwrap_or(transcript.inputs.len() as u64);
+            if transcript.net.is_some() && run.runner.exe.is_some() {
+                return usage("a networked transcript replays in process, not with --worker");
+            }
+            replay_net = transcript.net;
             (transcript.inputs, store, frames)
         }
         None => match load_script(run.input) {
@@ -624,6 +774,17 @@ fn run_headless(run: HeadlessRun<'_>) -> u8 {
             Err(code) => return code,
         },
     };
+    // The environment: the run's own `--net`, or the recorded one. A
+    // replay never builds a link, so no endpoint can be constructed.
+    let env = match (&run.net, &replay_net) {
+        (Some(mode), _) => mode.env(),
+        (None, Some(record)) => record.env.clone(),
+        (None, None) => NetEnv::default(),
+    };
+    let mut link = run.net.as_ref().map(|_| iroh_link());
+    if run.net.is_some() && !declares_net(&snap) {
+        eprintln!("note: --net given but the cart does not declare services = [\"net\"]");
+    }
     if let Some(out) = run.out {
         if let Err(e) = std::fs::create_dir_all(out) {
             return usage(&format!("cannot create {}: {e}", out.display()));
@@ -636,12 +797,14 @@ fn run_headless(run: HeadlessRun<'_>) -> u8 {
             store.all_slots(),
         ))
     });
+    let inner = factory(&run.runner, recorder.clone());
     let mut console = Console::new_with(
         Rc::new(snap),
-        factory(&run.runner, recorder.clone()),
+        ReplayGuest::factory(inner, replay_net),
         run.runner.preload(),
     );
     console.set_save_store(Box::new(store));
+    console.set_net_env(env);
 
     let mut last: Option<OwnedFrame> = None;
     // First frame PNG that failed to write; later frames are not attempted.
@@ -650,7 +813,8 @@ fn run_headless(run: HeadlessRun<'_>) -> u8 {
     let mut audio: Vec<i16> = Vec::new();
     let out = run.out;
     let screenshot = run.screenshot;
-    let summary = kuula_host_headless::run(&mut console, frames, &inputs, |n, frame| {
+    let times;
+    let mut sink = |n: u64, frame: &OwnedFrame| {
         for line in &frame.log {
             println!("{line}");
         }
@@ -667,9 +831,47 @@ fn run_headless(run: HeadlessRun<'_>) -> u8 {
         if screenshot.is_some() {
             last = Some(frame.clone());
         }
-    });
-    // The worker, if any, is stopped when the console drops.
+    };
+    let summary = match link.as_mut() {
+        Some(link) => {
+            // Paced to real time so a human can join a headless host;
+            // the ticket is printed the way the diagnostic prints it.
+            // The timer sits inside the pacer, so `--timing` reports
+            // the poll and the step, not the wait for the next frame.
+            let frame_time = Duration::from_nanos(1_000_000_000 / kuula_core::FRAME_RATE as u64);
+            let mut linked = Linked::new(&mut console, link).on_hosting(|ticket| {
+                println!("ticket: {ticket}");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            });
+            let mut timed = Timed {
+                inner: &mut linked,
+                times: Vec::new(),
+            };
+            let summary = {
+                let mut paced = Paced::new(&mut timed, frame_time);
+                kuula_host_headless::run(&mut paced, frames, &inputs, &mut sink)
+            };
+            times = timed.times;
+            summary
+        }
+        None => {
+            let mut timed = Timed {
+                inner: &mut console,
+                times: Vec::new(),
+            };
+            let summary = kuula_host_headless::run(&mut timed, frames, &inputs, &mut sink);
+            times = timed.times;
+            summary
+        }
+    };
+    // The worker, if any, is stopped when the console drops; the link
+    // goes with it, saying bye to a peer.
     drop(console);
+    drop(link);
+    if run.timing {
+        eprintln!("{}", timing_line(times));
+    }
     if let Some(e) = write_error {
         eprintln!("{e}");
         return EXIT_FAULT;

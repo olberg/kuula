@@ -18,10 +18,11 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use kuula_core::net::{Event, NetEnv, MAX_BATCH};
 use kuula_core::{ConsoleState, DrawState, Fault, FrameInput, Guest, SharedRecorder};
-use kuula_host_headless::{OwnedFrame, StepError};
+use kuula_host_headless::StepError;
 
-use crate::broker::Worker;
+use crate::broker::{Reply, Worker};
 
 /// How long a responsive step waits for the frame before letting the
 /// host loop go round again.
@@ -47,6 +48,14 @@ pub struct RemoteGuest {
     worker: Option<Worker>,
     /// When the step in flight was sent.
     pending: Option<Instant>,
+    /// The events the step in flight carried, for the recorder.
+    sent_events: Vec<Event>,
+    /// Control events (a permission change) the console's mirror
+    /// admitted on a tick the worker did not see, because a step was
+    /// in flight; they go first on the next step. Room is zero while a
+    /// step is in flight, so nothing else can arrive then. At most
+    /// [`MAX_BATCH`], the newest kept.
+    carried: Vec<Event>,
 }
 
 fn fault(e: StepError) -> Fault {
@@ -59,6 +68,8 @@ impl RemoteGuest {
             config,
             worker: None,
             pending: None,
+            sent_events: Vec::new(),
+            carried: Vec::new(),
         }
     }
 
@@ -82,8 +93,17 @@ impl RemoteGuest {
             )
         })?;
         let saves = state.saves.all_slots();
+        // The worker's cart gets the permission and invite this one has;
+        // a cart without the service gets none.
+        let net = match &state.net {
+            Some(n) => NetEnv {
+                permitted: n.permitted,
+                invite: n.invite.clone(),
+            },
+            None => NetEnv::default(),
+        };
         let mut worker = Worker::spawn(&self.config.exe, self.config.sandboxed).map_err(fault)?;
-        let (w, h) = worker.load(snapshot, saves).map_err(fault)?;
+        let (w, h) = worker.load(snapshot, saves, net).map_err(fault)?;
         if (w, h) != (state.width(), state.height()) {
             worker.stop();
             return Err(Fault::new(
@@ -103,7 +123,24 @@ impl RemoteGuest {
 }
 
 /// Copy a worker's frame into the draw state.
-fn apply(state: &mut DrawState, frame: &OwnedFrame, saves: Vec<(u8, Vec<u8>)>) {
+fn apply(state: &mut DrawState, reply: Reply) {
+    let Reply {
+        frame,
+        saves,
+        commands,
+        net_room,
+    } = reply;
+    let frame = &frame;
+    if let Some(net) = state.net.as_mut() {
+        // The worker's console is the real one: its commands become
+        // this frame's outbox and its room bounds the next step. The
+        // mirror's own inbox is never read by a cart, so it is emptied
+        // here; left to fill, it would make the mirror drop events the
+        // worker had room for.
+        net.outbox = commands;
+        net.remote_room = Some(net_room);
+        net.inbox.clear();
+    }
     let screen = state.screen_pixels_mut();
     let n = screen.len().min(frame.pixels.len());
     screen[..n].copy_from_slice(&frame.pixels[..n]);
@@ -127,11 +164,47 @@ impl Guest for RemoteGuest {
         }
         let worker = self.worker.as_mut().expect("spawned above");
         if self.pending.is_none() {
+            let events = match state.net.as_mut() {
+                Some(net) => {
+                    // No room while a step is in flight: nothing offered
+                    // then is lost when the console's mirror sees a
+                    // tick the worker does not.
+                    net.remote_room = Some(0);
+                    let mut events = std::mem::take(&mut self.carried);
+                    events.extend(net.admitted.iter().cloned());
+                    // The carried events and this tick's batch are each
+                    // within the bound, but not together: the worker
+                    // takes one batch, so the tail rides the next step
+                    // and the recording stays what the cart saw.
+                    if events.len() > MAX_BATCH {
+                        self.carried = events.split_off(MAX_BATCH);
+                    }
+                    events
+                }
+                None => Vec::new(),
+            };
             if let Some(r) = &self.config.recorder {
-                r.borrow_mut().record(input);
+                let mut r = r.borrow_mut();
+                if let Some(net) = &state.net {
+                    r.enable_net(&NetEnv {
+                        permitted: net.permitted,
+                        invite: net.invite.clone(),
+                    });
+                }
+                r.record(input);
             }
-            worker.send_step(input).map_err(fault)?;
+            worker.send_step(input, events.clone()).map_err(fault)?;
+            self.sent_events = events;
             self.pending = Some(Instant::now());
+        } else if let Some(net) = state.net.as_mut() {
+            // A tick the worker does not see: what the mirror admitted
+            // (control events only, the room being zero) would be
+            // cleared by the next tick, so keep it for the next step.
+            self.carried.append(&mut net.admitted);
+            if self.carried.len() > MAX_BATCH {
+                let excess = self.carried.len() - MAX_BATCH;
+                self.carried.drain(..excess);
+            }
         }
         let sent = self.pending.expect("a step is in flight");
         let wait = if self.config.responsive {
@@ -140,13 +213,30 @@ impl Guest for RemoteGuest {
             worker.step_timeout()
         };
         match worker.poll_frame(wait) {
-            Ok(Some((frame, saves))) => {
+            Ok(Some(reply)) => {
                 self.pending = None;
-                apply(state, &frame, saves);
-                match frame.state {
+                let outcome = reply.frame.state.clone();
+                apply(state, reply);
+                if let Some(net) = state.net.as_mut() {
+                    // The carried events ride the next step, within the
+                    // same batch bound, so the room offered shrinks by
+                    // as many.
+                    if let Some(r) = net.remote_room {
+                        net.remote_room = Some(r.saturating_sub(self.carried.len()));
+                    }
+                }
+                let outcome = match outcome {
                     ConsoleState::Faulted(f) => Err(f),
                     ConsoleState::Running => Ok(()),
+                };
+                if let (Some(r), Some(net)) = (&self.config.recorder, &state.net) {
+                    // A faulting frame's commands are discarded, as in
+                    // process.
+                    let none = Vec::new();
+                    let commands = if outcome.is_ok() { &net.outbox } else { &none };
+                    r.borrow_mut().record_net(&self.sent_events, commands);
                 }
+                outcome
             }
             Ok(None) => {
                 let waited = sent.elapsed();

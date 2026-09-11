@@ -277,7 +277,7 @@ pub fn circfill(s: &mut Surface, pen: &Pen, cx: i32, cy: i32, r: i32, c: Colour)
 /// Pixels' worth of work a circle of radius `r` costs before clipping:
 /// the midpoint walk plots about six points per unit of radius.
 pub fn circle_work(r: i32) -> u64 {
-    r.clamp(0, MAX_RADIUS) as u64 * 6
+    r.clamp(0, MAX_RADIUS) as u64 * crate::meter::price::CIRCLE_WORK_PER_RADIUS
 }
 
 fn circle_visible(pen: &Pen, cx: i32, cy: i32, r: i32) -> bool {

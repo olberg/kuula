@@ -7,4 +7,16 @@ description = "SDL2 desktop host for Kuula with an integer scaler."
 
 [dependencies]
 kuula-core.workspace = true
-sdl2.workspace = true
+
+# Windows: SDL2 compiled from the crate's bundled source and linked
+# statically, so kuula.exe carries no DLL.
+[target.'cfg(windows)'.dependencies]
+sdl2 = { workspace = true, features = ["bundled", "static-link"] }
+
+# Everywhere else: the system SDL2 through pkg-config (libsdl2-dev or
+# the distro's equivalent). The crate's bundled SDL is 2.26.4, whose
+# PipeWire backend no longer compiles against current PipeWire headers
+# (fixed upstream in SDL commit 9e079fe, which distro packages carry);
+# the Docker build in `Dockerfile` is the reference Linux build.
+[target.'cfg(not(windows))'.dependencies]
+sdl2 = { workspace = true, features = ["use-pkgconfig"] }

@@ -6,6 +6,7 @@
 //! Keys holding cart-provided text, cleaned but untrusted: `title`,
 //! `log[].text`, `fault.message`, `state.text`, `errors[].message`.
 
+use kuula_core::net::NetEnv;
 use kuula_core::transcript::{Transcript, MAX_FILE_BYTES};
 use kuula_core::{Category, Fault, FrameInput, FrameProfile};
 use kuula_host_headless::{frame_png, InputScript};
@@ -114,7 +115,8 @@ pub fn list() -> Vec<Value> {
             json!({
                 "cart": {"type": "string", "description": "Cart directory, relative to the server root."},
                 "frames": {"type": "integer", "minimum": 0, "maximum": MAX_FRAMES_PER_CALL},
-                "record": {"type": "boolean", "description": "Record the inputs the cart sees; `stop` returns the transcript."}
+                "record": {"type": "boolean", "description": "Record the inputs the cart sees; `stop` returns the transcript."},
+                "net": {"description": "Permit networking for a cart that declares services = [\"net\"]: \"host\", or {\"join\": \"<ticket>\"}. The result's `net` carries the status and, once hosting has begun, the ticket; `step` results carry the same field, so poll with `step` until it is there. Refused (net_unavailable) when the server was started without networking."}
             }),
             &["cart"],
         ),
@@ -285,8 +287,10 @@ fn profile_json(frame: u64, p: &FrameProfile) -> Value {
     })
 }
 
-/// The frame count, fault and lines a batch of steps produced.
-fn steps_json(handle: &str, frame: u64, running: bool, steps: &[Stepped]) -> Value {
+/// The frame count, fault, lines and network status a batch of steps
+/// produced.
+fn steps_json(handle: &str, live: &crate::session::Live, steps: &[Stepped]) -> Value {
+    let (frame, running) = (live.frame(), live.is_running());
     let log: Vec<Value> = steps
         .iter()
         .flat_map(|s| s.log.iter().map(log_json))
@@ -300,6 +304,7 @@ fn steps_json(handle: &str, frame: u64, running: bool, steps: &[Stepped]) -> Val
         "frames_run": steps.len(),
         "running": running,
         "fault": fault,
+        "net": net_json(live),
         "log": log,
     })
 }
@@ -354,15 +359,52 @@ fn arg_bool(args: &Map<String, Value>, key: &str) -> Result<bool, ToolError> {
     }
 }
 
+/// The `net` argument of `run`: `"host"` or `{"join": ticket}`.
+fn arg_net(args: &Map<String, Value>) -> Result<Option<NetEnv>, ToolError> {
+    match args.get("net") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s == "host" => Ok(Some(NetEnv {
+            permitted: true,
+            invite: None,
+        })),
+        Some(Value::Object(o)) => match o.get("join") {
+            Some(Value::String(t)) if t.len() <= kuula_core::net::MAX_TICKET => Ok(Some(NetEnv {
+                permitted: true,
+                invite: Some(t.clone()),
+            })),
+            _ => Err(invalid("net must be \"host\" or {\"join\": \"<ticket>\"}")),
+        },
+        Some(_) => Err(invalid("net must be \"host\" or {\"join\": \"<ticket>\"}")),
+    }
+}
+
+fn net_json(live: &crate::session::Live) -> Value {
+    match live.net() {
+        Some((status, ticket)) => json!({"status": status, "ticket": ticket}),
+        None => Value::Null,
+    }
+}
+
 fn run(session: &mut Session, args: &Map<String, Value>) -> Result<ToolOutput, ToolError> {
     let cart = arg_str(args, "cart")?;
     let frames = arg_frames(args, DEFAULT_RUN_FRAMES)?;
     let record = arg_bool(args, "record")?;
+    let net = arg_net(args)?;
+    let link = match &net {
+        Some(_) => Some(session.link().ok_or_else(|| {
+            ToolError::new(
+                "net_unavailable",
+                "this server was started without networking",
+            )
+        })?),
+        None => None,
+    };
     let snap = session.snapshot(cart)?;
-    let (console, recorder) = Session::build_with(snap, record, &[])?;
+    let (console, recorder) =
+        Session::build_with(snap, record, &[], net.unwrap_or_default(), None)?;
     let title = clean_text(&console.manifest().title);
     let (w, h) = console.screen_mode().size();
-    let handle = session.open_with(console, recorder)?;
+    let handle = session.open_with(console, recorder, link)?;
     let live = session.get(&handle)?;
     let steps = live.step_many(frames, Some(&[]));
     let running = live.is_running();
@@ -378,6 +420,7 @@ fn run(session: &mut Session, args: &Map<String, Value>) -> Result<ToolOutput, T
         "running": running,
         "fault": fault,
         "recording": record,
+        "net": net_json(live),
         "log": steps.iter().flat_map(|s| s.log.iter().map(log_json)).collect::<Vec<_>>(),
     })))
 }
@@ -423,7 +466,15 @@ fn replay(session: &mut Session, args: &Map<String, Value>) -> Result<ToolOutput
     }
     let total = transcript.inputs.len() as u64;
     let frames = arg_frames(args, total.min(MAX_FRAMES_PER_CALL))?;
-    let (console, _) = Session::build_with(snap, false, &transcript.header.saves)?;
+    // A version 2 transcript replays its network records through the
+    // guest; no link and no transport exist for it.
+    let env = transcript
+        .net
+        .as_ref()
+        .map(|n| n.env.clone())
+        .unwrap_or_default();
+    let (console, _) =
+        Session::build_with(snap, false, &transcript.header.saves, env, transcript.net)?;
     let title = clean_text(&console.manifest().title);
     let (w, h) = console.screen_mode().size();
     let handle = session.open(console)?;
@@ -441,6 +492,7 @@ fn replay(session: &mut Session, args: &Map<String, Value>) -> Result<ToolOutput
         "transcript_frames": total,
         "queued": live.queued(),
         "verifies": verifies,
+        "net": net_json(live),
         "width": w,
         "height": h,
         "running": running,
@@ -468,12 +520,7 @@ fn step(session: &mut Session, args: &Map<String, Value>) -> Result<ToolOutput, 
         }
     }
     let steps = live.step_many(frames, script.as_deref());
-    Ok(ToolOutput::json(steps_json(
-        handle,
-        live.frame(),
-        live.is_running(),
-        &steps,
-    )))
+    Ok(ToolOutput::json(steps_json(handle, live, &steps)))
 }
 
 fn input(session: &mut Session, args: &Map<String, Value>) -> Result<ToolOutput, ToolError> {

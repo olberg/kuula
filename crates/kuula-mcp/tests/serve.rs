@@ -51,10 +51,19 @@ fn call(id: u64, tool: &str, args: Value) -> String {
 
 /// Run a whole conversation and return the responses in order.
 fn talk(root: PathBuf, lines: &[String]) -> Vec<Value> {
+    talk_with(root, lines, None)
+}
+
+/// `talk` with a transport factory, so `run` may host or join.
+fn talk_with(
+    root: PathBuf,
+    lines: &[String],
+    transports: Option<kuula_mcp::TransportFactory>,
+) -> Vec<Value> {
     let mut input = lines.join("\n");
     input.push('\n');
     let mut out = Vec::new();
-    kuula_mcp::serve(Cursor::new(input.into_bytes()), &mut out, root).unwrap();
+    kuula_mcp::serve(Cursor::new(input.into_bytes()), &mut out, root, transports).unwrap();
     let text = String::from_utf8(out).unwrap();
     text.lines()
         .map(|l| serde_json::from_str(l).expect("each line is JSON"))
@@ -211,6 +220,57 @@ fn hello_runs_steps_screenshots_and_stops() {
 
     assert_eq!(structured(&replies[10])["stopped"], true);
     assert_eq!(error_code(&replies[11]), "stale_handle");
+}
+
+#[test]
+fn a_hosting_run_reports_its_ticket_through_step() {
+    use kuula_core::net::{MemoryTransport, Transport, MEMORY_TICKET};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let scratch = Scratch::new();
+    scratch.cart(
+        "host",
+        "function _update() if not started then started = true net.host() end end",
+    );
+    std::fs::write(
+        scratch.0.join("host").join("cart.toml"),
+        "[cart]\nservices = [\"net\"]\n",
+    )
+    .unwrap();
+    // The peer sides are kept so the pair stays open.
+    let peers: Rc<RefCell<Vec<MemoryTransport>>> = Default::default();
+    let stash = peers.clone();
+    let transports: kuula_mcp::TransportFactory = Rc::new(move || {
+        let (a, b) = MemoryTransport::pair();
+        stash.borrow_mut().push(b);
+        Box::new(a) as Box<dyn Transport>
+    });
+    let replies = talk_with(
+        scratch.0.clone(),
+        &[
+            init(),
+            call(
+                2,
+                "run",
+                json!({"cart": "host", "frames": 1, "net": "host"}),
+            ),
+            call(3, "step", json!({"console": "c1", "frames": 1})),
+            call(4, "step", json!({"console": "c1", "frames": 1})),
+        ],
+        Some(transports),
+    );
+    // Hosting is asynchronous: the run returns before the cart has even
+    // asked (its first `_update` is frame 2), and the step in which it
+    // asks reports hosting with no ticket yet.
+    let run = structured(&replies[1]);
+    assert_eq!(run["net"]["ticket"], Value::Null, "{run}");
+    let step = structured(&replies[2]);
+    assert_eq!(step["net"]["status"], "hosting", "{step}");
+    assert_eq!(step["net"]["ticket"], Value::Null, "{step}");
+    // The next step carries the ticket.
+    let step = structured(&replies[3]);
+    assert_eq!(step["net"]["status"], "hosting", "{step}");
+    assert_eq!(step["net"]["ticket"], MEMORY_TICKET, "{step}");
 }
 
 #[test]

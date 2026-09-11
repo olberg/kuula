@@ -1,0 +1,4 @@
+[cart]
+title = "Net buttons"
+screen_mode = "320x240"
+services = ["net"]

@@ -17,6 +17,8 @@ target/release/kuula run alien-invaders
 
 Arrow keys are the D-pad, Z and X are the A and B buttons. Ctrl+1 to Ctrl+4 change the window scale.
 
+On Windows the build is self-contained. On Linux it links the system SDL2, so install `libsdl2-dev` and `pkg-config` first.
+
 Carts can also run without a window:
 
 ```
@@ -46,6 +48,21 @@ A cart is a directory with `main.lua` in it, plus optional `cart.toml`, sprite s
 | `kuula-mcp` | the console's tools over stdio JSON-RPC |
 
 `rom/main.lua` is the built-in shell.
+
+## Changelog
+
+### 0.0.2
+
+- Peer-to-peer cart networking: `net.host`, `net.join`, `net.send`, `net.recv` and friends, one peer per session, gated by a permission in the shell settings. See the `net` section of [docs/api.md](docs/api.md) and the `examples/netbuttons` cart.
+- Transcripts record network traffic too, so a networked run replays byte for byte.
+- The shell keeps its settings (scale, net permission) in a file between runs. `--scale` is now optional.
+- `kuula net listen` and `kuula net join`: a connectivity diagnostic.
+- [docs/api.md](docs/api.md) is generated from the bindings and a check fails when it is stale, so the reference cannot drift from the code.
+- Linux build: the system SDL2 is used off Windows, and Lua string hashing is seeded the same way on every platform, so conformance hashes match across OSes.
+
+### 0.0.1
+
+- First release: the console, the Lua 5.5 guest, the desktop and headless hosts, the shell, the MCP server, transcripts and the example carts.
 
 ## License
 

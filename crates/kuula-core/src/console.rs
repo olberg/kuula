@@ -6,6 +6,7 @@ use crate::fault::Fault;
 use crate::input::{FrameInput, BTN_MENU};
 use crate::manifest::{Manifest, ManifestError, ScreenMode, MANIFEST_FILE};
 use crate::meter::FrameProfile;
+use crate::net::{self, NetEnv, NetState};
 use crate::palette::PALETTE_SIZE;
 use crate::save::SaveStore;
 use crate::shell::{self, CartEntry, Settings, SysRequest, SysState};
@@ -103,6 +104,13 @@ struct Cart {
     status: ConsoleState,
     manifest: Manifest,
     source: Option<Rc<dyn CartSource>>,
+    /// Network events offered by the host and not yet admitted: they
+    /// wait here while the cart is paused, and at most `MAX_BATCH` are
+    /// admitted per step.
+    net_pending: std::collections::VecDeque<net::Event>,
+    /// A session was live when this cart (or the one before it) was
+    /// torn down; the host owes the peer a `Leave`.
+    net_teardown: bool,
 }
 
 /// The shell's half: a second guest drawing into the overlay.
@@ -114,6 +122,10 @@ struct Shell {
     presentation: Vec<u8>,
     paused: bool,
     menu_was: bool,
+    /// Buttons held when the shell handed the screen to the cart. They
+    /// stay masked from the cart until released, so the A that chose a
+    /// cart in the list is not an A press inside that cart.
+    stale: u8,
     opener: CartOpener,
     factory: GuestFactory,
     preload: Preload,
@@ -126,19 +138,31 @@ pub struct Console {
     cart: Cart,
     shell: Option<Shell>,
     silence: Vec<i16>,
+    /// What a cart that declares the net service starts with.
+    net_env: NetEnv,
 }
+
+mod net_side;
 
 impl Cart {
     /// Read `cart.toml` and `main.lua` from `source`, decode the preload
     /// set and build a guest. Any error yields a cart that is already
     /// faulted, so the host reports it like a runtime fault.
-    fn load(source: Rc<dyn CartSource>, factory: &dyn FactoryFn, preload: Preload) -> Cart {
+    fn load(
+        source: Rc<dyn CartSource>,
+        factory: &dyn FactoryFn,
+        preload: Preload,
+        env: &NetEnv,
+    ) -> Cart {
         let manifest = match read_manifest(source.as_ref()) {
             Ok(m) => m,
             Err(fault) => return Cart::faulted(fault, Manifest::default(), Some(source)),
         };
         let (w, h) = manifest.screen_mode.size();
         let mut state = DrawState::new(w, h, source.clone());
+        if manifest.has_service(crate::manifest::Service::Net) {
+            state.net = Some(NetState::new(env));
+        }
         let (sheets, maps): (&[String], &[String]) = match preload {
             Preload::Decode => (&manifest.preload_sheets, &manifest.preload_maps),
             Preload::Skip => (&[], &[]),
@@ -198,6 +222,8 @@ impl Cart {
                 status: ConsoleState::Running,
                 manifest,
                 source: Some(source),
+                net_pending: Default::default(),
+                net_teardown: false,
             },
             Err(fault) => Cart::faulted(fault, manifest, Some(source)),
         }
@@ -212,6 +238,8 @@ impl Cart {
             status: ConsoleState::Faulted(fault),
             manifest,
             source,
+            net_pending: Default::default(),
+            net_teardown: false,
         }
     }
 
@@ -225,16 +253,29 @@ impl Cart {
             status: ConsoleState::Running,
             manifest: Manifest::default(),
             source: None,
+            net_pending: Default::default(),
+            net_teardown: false,
         }
     }
 
     fn step(&mut self, input: FrameInput) {
         if let (ConsoleState::Running, Some(guest)) = (&self.status, self.guest.as_mut()) {
             self.frame += 1;
+            // The frame's batch: what the host offered, up to the bound,
+            // admitted before the cart runs.
+            if let Some(net) = self.state.net.as_mut() {
+                let n = self.net_pending.len().min(net::MAX_BATCH);
+                let batch: Vec<net::Event> = self.net_pending.drain(..n).collect();
+                net.begin_frame(batch);
+            }
             if let Err(fault) = guest.step(&mut self.state, input, self.frame) {
                 self.status = ConsoleState::Faulted(fault);
-                // A faulted cart's sound stops with it.
+                // A faulted cart's sound stops with it, and its session
+                // ends: the host says bye for it.
                 self.state.audio.stop_all();
+                if self.state.net.as_ref().is_some_and(|n| n.is_live()) {
+                    self.net_teardown = true;
+                }
             }
         }
         // Audio renders every step, faulted or not, so the host's ring
@@ -269,6 +310,7 @@ impl Console {
                 f(text, name)
             },
             preload,
+            &NetEnv::default(),
         );
         Console::from_cart(cart)
     }
@@ -291,6 +333,7 @@ impl Console {
             cart,
             shell: None,
             silence: vec![0; SAMPLES_PER_FRAME],
+            net_env: NetEnv::default(),
         }
     }
 
@@ -319,6 +362,7 @@ impl Console {
             presentation: Vec::new(),
             paused: false,
             menu_was: false,
+            stale: 0,
             opener,
             factory,
             preload,
@@ -334,7 +378,7 @@ impl Console {
             Some(s) => (s.factory.clone(), s.preload),
             None => return,
         };
-        let mut cart = Cart::load(source, &*factory, preload);
+        let mut cart = Cart::load(source, &*factory, preload, &self.net_env);
         cart.state.saves = store;
         self.install_cart(cart);
     }
@@ -352,6 +396,10 @@ impl Console {
             }
             shell.paused = false;
         }
+        // A live session of the outgoing cart ends with it; the host
+        // owes its peer a `Leave`, which `take_net_commands` delivers.
+        cart.net_teardown =
+            self.cart.net_teardown || self.cart.state.net.as_ref().is_some_and(|n| n.is_live());
         self.cart = cart;
     }
 
@@ -359,6 +407,13 @@ impl Console {
     /// the last screen with an empty log, so a host that echoes the log
     /// every step prints the faulting frame's lines once.
     pub fn step(&mut self, input: FrameInput) -> FrameOutput<'_> {
+        self.step_with(input, Vec::new())
+    }
+
+    /// [`Console::step`] with the network events the host offers for
+    /// this frame; see `net_side.rs`.
+    pub fn step_with(&mut self, input: FrameInput, events: Vec<net::Event>) -> FrameOutput<'_> {
+        self.offer_net_events(events);
         self.cart.state.log.clear();
         let Some(shell) = self.shell.as_mut() else {
             self.cart.step(input.for_cart());
@@ -372,8 +427,10 @@ impl Console {
         let overlay_active =
             shell.paused || self.cart.guest.is_none() || self.cart.status.fault().is_some();
 
+        shell.stale &= input.buttons;
+        let cart_input = FrameInput::new(input.buttons & !shell.stale).for_cart();
         if !shell.paused {
-            self.cart.step(input.for_cart());
+            self.cart.step(cart_input);
         }
 
         // The shell sees the buttons only while its overlay is up, so a
@@ -406,6 +463,11 @@ impl Console {
             self.apply(r);
         }
         let shell = self.shell.as_mut().expect("shell survives its step");
+        let overlay_now =
+            shell.paused || self.cart.guest.is_none() || self.cart.status.fault().is_some();
+        if overlay_active && !overlay_now {
+            shell.stale = input.buttons;
+        }
         if shell.status.fault().is_none() {
             shell::compose(
                 self.cart.state.screen_pixels(),
@@ -454,11 +516,23 @@ impl Console {
                     sys.settings.volume = v;
                 }
                 self.cart.state.audio.set_master(v as u8);
+                // The host persists it.
+                shell.host_requests.push(SysRequest::SetVolume(v));
+            }
+            SysRequest::SetNet(on) => {
+                if let Some(sys) = shell.state.sys.as_mut() {
+                    sys.settings.net = on;
+                }
+                // Carts loaded from now on start with this permission;
+                // the running one is told through its link's event.
+                self.net_env.permitted = on;
+                shell.host_requests.push(SysRequest::SetNet(on));
             }
         }
     }
 
-    /// Requests only the host can carry out (the window scale), drained.
+    /// Requests the host carries out or persists (the window scale,
+    /// the volume, the network permission), drained.
     pub fn take_host_requests(&mut self) -> Vec<SysRequest> {
         match &mut self.shell {
             Some(s) => std::mem::take(&mut s.host_requests),
@@ -840,5 +914,65 @@ mod tests {
         assert!(silent, "a paused cart stays silent after its shell dies");
         let out = c.step(FrameInput::NONE);
         assert!(out.audio.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn buttons_held_when_the_shell_starts_a_cart_stay_masked_until_released() {
+        use crate::input::BTN_A;
+        use crate::save::MemoryStore;
+        use crate::shell::Settings;
+        use std::cell::RefCell;
+
+        struct StubShell;
+        impl Guest for StubShell {
+            fn step(
+                &mut self,
+                state: &mut DrawState,
+                _: FrameInput,
+                frame: u64,
+            ) -> Result<(), Fault> {
+                let sys = state.sys.as_mut().expect("the shell has sys");
+                if frame == 1 {
+                    sys.request(SysRequest::Run("cart".into()));
+                }
+                Ok(())
+            }
+        }
+        struct Records(Rc<RefCell<Vec<u8>>>);
+        impl Guest for Records {
+            fn step(&mut self, _: &mut DrawState, input: FrameInput, _: u64) -> Result<(), Fault> {
+                self.0.borrow_mut().push(input.buttons);
+                Ok(())
+            }
+        }
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let source = cart(vec![("main.lua", b"")]);
+        let opener: CartOpener = Rc::new(move |_: &str| {
+            Ok((
+                source.clone(),
+                Box::new(MemoryStore::new()) as Box<dyn SaveStore>,
+            ))
+        });
+        let recorded = seen.clone();
+        let factory: GuestFactory = Rc::new(move |_: &str, _: &str| {
+            Ok(Box::new(Records(recorded.clone())) as Box<dyn Guest>)
+        });
+        let mut c = Console::with_shell(
+            Box::new(StubShell),
+            Vec::new(),
+            Settings::default(),
+            opener,
+            factory,
+            Preload::Decode,
+        );
+        let a = FrameInput::new(BTN_A);
+        // A is held while the shell picks the cart and for two more
+        // frames after the cart starts.
+        c.step(a);
+        c.step(a);
+        c.step(a);
+        c.step(FrameInput::NONE);
+        c.step(a);
+        assert_eq!(*seen.borrow(), vec![0, 0, 0, BTN_A]);
     }
 }

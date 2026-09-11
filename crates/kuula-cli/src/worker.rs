@@ -9,7 +9,6 @@ use std::io::{self, BufReader, BufWriter};
 use std::rc::Rc;
 
 use kuula_core::{Console, MemoryStore, SaveError, SaveStore};
-use kuula_host_headless::Stepper;
 use kuula_lua::LuaGuest;
 
 use crate::ipc::{self, Message, ReadError};
@@ -67,13 +66,18 @@ pub fn main() -> u8 {
             }
         };
         let reply = match msg {
-            Message::Load { snapshot, saves } => match MemoryStore::from_slots(&saves) {
+            Message::Load {
+                snapshot,
+                saves,
+                net,
+            } => match MemoryStore::from_slots(&saves) {
                 Ok(store) => {
                     let mut c = LuaGuest::console(Rc::new(snapshot));
                     c.set_save_store(Box::new(RecordingStore {
                         inner: store,
                         writes: writes.clone(),
                     }));
+                    c.set_net_env(net);
                     let out = c.output();
                     let ready = Message::Ready {
                         width: out.width,
@@ -87,21 +91,25 @@ pub fn main() -> u8 {
                     message: format!("initial saves refused: {e}"),
                 },
             },
-            Message::Step(input) => match console.as_mut() {
+            Message::Step { input, events } => match console.as_mut() {
                 _ if std::env::var_os(CRASH_HOOK).is_some() => std::process::exit(9),
                 _ if std::env::var_os(HANG_HOOK).is_some() => loop {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 },
-                Some(c) => match Stepper::step(c, input) {
-                    Ok(frame) => Message::Frame {
+                Some(c) => {
+                    // The events were bounded by the decoder; the cart's
+                    // commands come back with the frame, and the room
+                    // its inbox has left tells the broker how many
+                    // events the next step may carry.
+                    let frame = kuula_host_headless::step_console(c, input, events);
+                    let commands = c.take_net_commands();
+                    Message::Frame {
                         frame,
                         saves: std::mem::take(&mut *writes.borrow_mut()),
-                    },
-                    Err(e) => Message::Error {
-                        code: e.code,
-                        message: e.message,
-                    },
-                },
+                        commands,
+                        net_room: c.net_room() as u32,
+                    }
+                }
                 None => Message::Error {
                     code: "worker_error".into(),
                     message: "Step before Load".into(),

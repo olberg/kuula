@@ -215,39 +215,62 @@ impl Meter {
 /// Prices in cycles for work measured in pixels, bytes or elements. Every
 /// binding also pays the minimum of one cycle through `charge`.
 pub mod price {
+    /// `cls` pixels per cycle: the clip area is cheap because it is
+    /// one fill.
+    pub const CLS_PIXELS_PER_CYCLE: u64 = 64;
+    /// Pixels per cycle for shapes, text and blits.
+    pub const PIXELS_PER_CYCLE: u64 = 3;
+    /// `map`: cycles per cell requested, on top of the pixels.
+    pub const MAP_CYCLES_PER_CELL: u64 = 2;
+    /// Bytes per cycle for log lines and other byte-sized API traffic.
+    pub const BYTES8: u64 = 8;
+    /// Bytes per cycle for buffer memory moved or allocated.
+    pub const BYTES128: u64 = 128;
+    /// Source bytes per cycle compiled by `require`.
+    pub const COMPILE_BYTES_PER_CYCLE: u64 = 4;
+    /// Divisor of the pattern-matching work estimate.
+    pub const PATTERN_DIVISOR: u64 = 256;
+    /// Cap on the exponent of the pattern-matching work estimate.
+    pub const PATTERN_MAX_EXPONENT: u32 = 8;
+    /// Pixels' worth of work per unit of radius a circle costs before
+    /// clipping (`raster::circle_work`).
+    pub const CIRCLE_WORK_PER_RADIUS: u64 = 6;
+
     /// `cls`: the clip area is cheap because it is one fill.
     pub fn cls(pixels: u64) -> u64 {
-        1 + pixels / 64
+        1 + pixels / CLS_PIXELS_PER_CYCLE
     }
 
     /// Shapes and blits: pixels touched after clipping.
     pub fn pixels(touched: u64) -> u64 {
-        1 + touched / 3
+        1 + touched / PIXELS_PER_CYCLE
     }
 
     /// `map`: per cell requested on top of the pixels.
     pub fn map(cells: u64, touched: u64) -> u64 {
-        cells.saturating_mul(2).saturating_add(pixels(touched))
+        cells
+            .saturating_mul(MAP_CYCLES_PER_CELL)
+            .saturating_add(pixels(touched))
     }
 
     /// `print` drawing: per character plus the pixels.
     pub fn text(chars: u64, touched: u64) -> u64 {
-        chars.max(1).saturating_add(touched / 3)
+        chars.max(1).saturating_add(touched / PIXELS_PER_CYCLE)
     }
 
     /// Log lines and other byte-sized API traffic.
     pub fn bytes8(bytes: u64) -> u64 {
-        1 + bytes / 8
+        1 + bytes / BYTES8
     }
 
     /// Buffer memory moved or allocated.
     pub fn bytes128(bytes: u64) -> u64 {
-        1 + bytes / 128
+        1 + bytes / BYTES128
     }
 
     /// Source compiled by `require`.
     pub fn compile(bytes: u64) -> u64 {
-        1 + bytes / 4
+        1 + bytes / COMPILE_BYTES_PER_CYCLE
     }
 
     /// Pattern matching, priced by its worst case: each backtracking
@@ -259,8 +282,9 @@ pub mod price {
     pub fn pattern(subject: u64, pattern: u64, quantifiers: u32, anchored: bool) -> u64 {
         let exp = quantifiers
             .saturating_add(if anchored { 0 } else { 1 })
-            .min(8);
-        let work = (pattern.max(1) as f64) * (subject.max(1) as f64).powi(exp as i32) / 256.0;
+            .min(PATTERN_MAX_EXPONENT);
+        let work = (pattern.max(1) as f64) * (subject.max(1) as f64).powi(exp as i32)
+            / PATTERN_DIVISOR as f64;
         if work >= u64::MAX as f64 {
             u64::MAX
         } else {

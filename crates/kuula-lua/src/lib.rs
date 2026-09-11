@@ -11,12 +11,15 @@
 //! mlua's hard limit above it, so a runaway allocation inside one
 //! callback is contained by the state.
 
+#[macro_use]
+pub mod api;
 mod audio;
 mod bindings;
 mod bufs;
 mod codec;
 mod fault;
 pub mod meter;
+mod natives;
 mod numeric;
 mod require;
 mod sys;
@@ -106,9 +109,11 @@ impl LuaGuest {
         lua.set_memory_limit(LUA_HEAP_HARD_LIMIT)
             .map_err(|e| fault_from_lua(&e, name, Fault::RUNTIME_ERROR))?;
         let graveyard: Graveyard = Rc::new(RefCell::new(Handles::default()));
-        bindings::install(&lua, graveyard.clone())
+        let mut reg = api::reg::Reg::lua(&lua);
+        bindings::install(&mut reg, graveyard.clone())
             .map_err(|e| fault_from_lua(&e, name, Fault::RUNTIME_ERROR))?;
-        meter::install(&lua).map_err(|e| fault_from_lua(&e, name, Fault::RUNTIME_ERROR))?;
+        meter::install(&mut reg).map_err(|e| fault_from_lua(&e, name, Fault::RUNTIME_ERROR))?;
+        drop(reg);
         // Lua reports a chunk named `@main.lua` as `main.lua:line:`. Text
         // mode refuses precompiled chunks.
         let chunk = lua
@@ -130,8 +135,15 @@ impl LuaGuest {
     ///. Only the host builds one.
     pub fn new_shell(source: &str, name: &str) -> Result<LuaGuest, Fault> {
         let guest = LuaGuest::new(source, name)?;
-        sys::install(&guest.lua).map_err(|e| fault_from_lua(&e, name, Fault::RUNTIME_ERROR))?;
+        sys::install(&mut api::reg::Reg::lua(&guest.lua))
+            .map_err(|e| fault_from_lua(&e, name, Fault::RUNTIME_ERROR))?;
         Ok(guest)
+    }
+
+    /// Install the `net` table. The console's first step does this for
+    /// a cart whose draw state carries a `NetState`; nothing else may.
+    pub(crate) fn install_net(&self) -> mlua::Result<()> {
+        bindings::net::install(&mut api::reg::Reg::lua(&self.lua))
     }
 
     /// Boxed factory with the signature [`Console::new`] wants.
@@ -232,6 +244,12 @@ impl Guest for LuaGuest {
         } else {
             INIT_BUDGET
         };
+        // The gated table goes in before any cart code runs, and only
+        // when the console gave this cart the service.
+        if !self.started && state.net.is_some() {
+            self.install_net()
+                .map_err(|e| fault_from_lua(&e, &self.chunk_name, Fault::RUNTIME_ERROR))?;
+        }
         let ctx = FrameCtx {
             state: std::mem::replace(state, DrawState::placeholder()),
             input,

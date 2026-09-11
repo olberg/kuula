@@ -1,0 +1,29 @@
+kuula-transcript 2
+{ cart = "0x47b1d6da0b20dc41", frames = 90, invite = "memory:pair", net = true, runtime = "0.0.2", seed = 0, services = { [1] = "net" }, version = 2 }
+{ buttons = 0, frames = 2 }
+{ at = 2, events = {}, io = { [1] = { op = "join", ticket = "memory:pair" } } }
+{ buttons = 0, frames = 1 }
+{ at = 3, events = { [1] = { kind = "connected", peer = 1 } }, io = {} }
+{ buttons = 0, frames = 7 }
+{ at = 10, events = { [1] = { data = blob"ZAE=", from = 1, kind = "message" } }, io = {} }
+{ buttons = 0, frames = 4 }
+{ buttons = 16, frames = 1 }
+{ at = 15, events = {}, io = { [1] = { data = blob"ZAU=", op = "send" } } }
+{ buttons = 16, frames = 2 }
+{ buttons = 0, frames = 3 }
+{ at = 20, events = { [1] = { data = blob"ZAI=", from = 1, kind = "message" } }, io = {} }
+{ buttons = 0, frames = 4 }
+{ buttons = 32, frames = 1 }
+{ at = 25, events = {}, io = { [1] = { data = blob"ZAY=", op = "send" } } }
+{ buttons = 32, frames = 2 }
+{ buttons = 0, frames = 3 }
+{ at = 30, events = { [1] = { data = blob"ZAM=", from = 1, kind = "message" }, [2] = { data = blob"ZAU=", from = 1, kind = "message" } }, io = {} }
+{ buttons = 0, frames = 4 }
+{ buttons = 48, frames = 1 }
+{ at = 35, events = {}, io = { [1] = { data = blob"ZAU=", op = "send" }, [2] = { data = blob"ZAY=", op = "send" } } }
+{ buttons = 48, frames = 1 }
+{ buttons = 0, frames = 4 }
+{ at = 40, events = { [1] = { data = blob"ZAQ=", from = 1, kind = "message" } }, io = {} }
+{ buttons = 0, frames = 30 }
+{ at = 70, events = { [1] = { granted = false, kind = "permission" } }, io = {} }
+{ buttons = 0, frames = 20 }

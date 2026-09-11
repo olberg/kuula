@@ -5,6 +5,8 @@
 //! a save or a state dump. A `buf` becomes a blob of its storage behind a
 //! small header; a blob with that header becomes a fresh `buf` on load.
 
+use crate::api::reg::Reg;
+use crate::api::{Group, Price, Scope, Sig};
 use crate::bindings::{with_ctx, with_gfx};
 use crate::bufs::{self, BufHandle};
 use crate::meter::charge;
@@ -282,63 +284,98 @@ fn slot_arg(slot: f64) -> Result<u8> {
         })
 }
 
-pub fn install(lua: &Lua, graveyard: Graveyard) -> Result<()> {
-    let g = lua.globals();
-
-    g.set(
-        "save",
-        lua.create_function(|lua, (slot, value): (f64, LuaValue)| {
-            let slot = slot_arg(slot)?;
-            if !matches!(value, LuaValue::Table(_)) {
-                return Err(Error::runtime(format!(
-                    "save takes a table, got {}",
-                    value.type_name()
-                )));
-            }
-            charge(lua, Category::Api, SAVE_FLAT_CYCLES)?;
-            let mut bufs = |id: BufId| read_buf(lua, id);
-            let (v, walked) = to_value(&value, Mode::Strict, &mut bufs);
-            // The walk is paid for whether or not it produced a value, so
-            // a save that fails on size is not cheaper than one that fits.
-            charge(lua, Category::Api, price::bytes8(walked.decoded as u64))?;
-            let v = v.map_err(Error::external)?;
-            let text = codec::encode(&v).map_err(Error::external)?;
-            charge(lua, Category::Api, price::bytes8(text.len() as u64))?;
-            with_ctx(lua, |ctx| ctx.state.saves.write(slot, text.as_bytes()))?
-                .map_err(Error::external)
-        })?,
-    )?;
+pub(crate) fn install(reg: &mut Reg<'_>, graveyard: Graveyard) -> Result<()> {
+    reg.function(&SAVE, |lua, (slot, value): (f64, LuaValue)| {
+        let slot = slot_arg(slot)?;
+        if !matches!(value, LuaValue::Table(_)) {
+            return Err(Error::runtime(format!(
+                "save takes a table, got {}",
+                value.type_name()
+            )));
+        }
+        charge(lua, Category::Api, SAVE_FLAT_CYCLES)?;
+        let mut bufs = |id: BufId| read_buf(lua, id);
+        let (v, walked) = to_value(&value, Mode::Strict, &mut bufs);
+        // The walk is paid for whether or not it produced a value, so
+        // a save that fails on size is not cheaper than one that fits.
+        charge(lua, Category::Api, price::bytes8(walked.decoded as u64))?;
+        let v = v.map_err(Error::external)?;
+        let text = codec::encode(&v).map_err(Error::external)?;
+        charge(lua, Category::Api, price::bytes8(text.len() as u64))?;
+        with_ctx(lua, |ctx| ctx.state.saves.write(slot, text.as_bytes()))?.map_err(Error::external)
+    })?;
 
     let gy = graveyard.clone();
-    g.set(
-        "load",
-        lua.create_function(move |lua, slot: f64| {
-            let slot = slot_arg(slot)?;
-            charge(lua, Category::Api, SAVE_FLAT_CYCLES)?;
-            let bytes =
-                with_ctx(lua, |ctx| ctx.state.saves.read(slot))?.map_err(Error::external)?;
-            let Some(bytes) = bytes else {
-                return Ok(LuaValue::Nil);
-            };
-            charge(lua, Category::Api, price::bytes8(bytes.len() as u64))?;
-            let v = codec::decode_bytes(&bytes).map_err(Error::external)?;
-            let gy = gy.clone();
-            let mut make_buf = move |lua: &Lua, kind: BufKind, w: u32, h: u32, data: &[u8]| {
-                charge(lua, Category::Buf, 1)?;
-                let id = with_gfx(lua, |ctx| ctx.state.buf_alloc(kind, w, h))?;
-                let ok = with_gfx(lua, |ctx| {
-                    Ok(ctx.state.res.get_mut(id)?.set_raw_bytes(data))
-                })?;
-                debug_assert!(ok, "blob shape was checked");
-                charge(lua, Category::Buf, price::bytes128(data.len() as u64))?;
-                bufs::handle(lua, id, &gy)
-            };
-            to_lua(lua, &v, &mut make_buf)
-        })?,
-    )?;
+    reg.function(&LOAD, move |lua, slot: f64| {
+        let slot = slot_arg(slot)?;
+        charge(lua, Category::Api, SAVE_FLAT_CYCLES)?;
+        let bytes = with_ctx(lua, |ctx| ctx.state.saves.read(slot))?.map_err(Error::external)?;
+        let Some(bytes) = bytes else {
+            return Ok(LuaValue::Nil);
+        };
+        charge(lua, Category::Api, price::bytes8(bytes.len() as u64))?;
+        let v = codec::decode_bytes(&bytes).map_err(Error::external)?;
+        let gy = gy.clone();
+        let mut make_buf = move |lua: &Lua, kind: BufKind, w: u32, h: u32, data: &[u8]| {
+            charge(lua, Category::Buf, 1)?;
+            let id = with_gfx(lua, |ctx| ctx.state.buf_alloc(kind, w, h))?;
+            let ok = with_gfx(lua, |ctx| {
+                Ok(ctx.state.res.get_mut(id)?.set_raw_bytes(data))
+            })?;
+            debug_assert!(ok, "blob shape was checked");
+            charge(lua, Category::Buf, price::bytes128(data.len() as u64))?;
+            bufs::handle(lua, id, &gy)
+        };
+        to_lua(lua, &v, &mut make_buf)
+    })?;
 
     Ok(())
 }
+
+const SAVE_ERRORS: &[&str] = &[
+    "save_slot",
+    "save_size",
+    "codec_unsupported",
+    "codec_cycle",
+    "codec_depth",
+    "codec_size",
+    "codec_key",
+    "codec_number",
+];
+
+binding!(SAVE {
+    name: "save",
+    scope: Scope::Global,
+    group: Group::Saves,
+    sigs: &[Sig::new("save(slot, table)", "nothing; slot 0 to 7")],
+    price: Price::Save,
+    errors: SAVE_ERRORS,
+    doc: "A value that is not a table is a Lua error. The walk is paid for \
+          whether or not the value fits, so a save that fails on size is \
+          not cheaper than one that succeeds.",
+});
+
+binding!(LOAD {
+    name: "load",
+    scope: Scope::Global,
+    group: Group::Saves,
+    sigs: &[Sig::new(
+        "load(slot)",
+        "the table, or `nil` when the slot is empty",
+    )],
+    price: Price::Load,
+    errors: &[
+        "save_slot",
+        "codec_syntax",
+        "codec_depth",
+        "codec_size",
+        "codec_key",
+        "codec_number",
+        "graphics_budget_exceeded",
+    ],
+    doc: "Every `buf` in the table comes back as a fresh buffer, priced \
+          like `buf`. A slot whose text does not decode is a codec error.",
+});
 
 /// The named globals as one canonical document, for `Guest::state`.
 pub(crate) fn dump_globals(lua: &Lua, names: &[String]) -> std::result::Result<String, CodecError> {

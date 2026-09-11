@@ -20,6 +20,7 @@ pub mod font;
 pub mod input;
 pub mod manifest;
 pub mod meter;
+pub mod net;
 pub mod palette;
 pub mod pen;
 pub mod raster;
@@ -36,7 +37,7 @@ pub use console::{Console, ConsoleState, FrameOutput, Guest, Preload};
 pub use draw::DrawState;
 pub use fault::Fault;
 pub use input::FrameInput;
-pub use manifest::{Manifest, ScreenMode};
+pub use manifest::{Manifest, ScreenMode, Service};
 pub use meter::{BudgetExceeded, Category, FrameProfile, Meter, CATEGORY_COUNT};
 pub use palette::{Palette, PaletteError, PALETTE_SIZE, SYSTEM_COLOURS};
 pub use pen::{Colour, Fillp};
@@ -44,10 +45,10 @@ pub use resources::{BufId, GfxError};
 pub use save::{FileStore, MemoryStore, SaveError, SaveStore, WriteThroughStore};
 pub use snapshot::{Snapshot, SnapshotLimits};
 pub use source::{CartSource, DirSource, SourceError};
-pub use transcript::{Recorder, RecordingGuest, SharedRecorder, Transcript};
+pub use transcript::{Recorder, RecordingGuest, ReplayGuest, SharedRecorder, Transcript};
 pub use zipsource::ZipSource;
 
-/// Simulation rate in frames per second. Iterations 1 and 2 hard-code 60.
+/// Simulation rate in frames per second. Fixed at 60.
 pub const FRAME_RATE: u32 = 60;
 
 /// Seconds per frame, handed to `_update(dt)`.

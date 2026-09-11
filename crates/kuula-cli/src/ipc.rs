@@ -6,6 +6,10 @@
 
 use std::io::{self, Read, Write};
 
+use kuula_core::net::{
+    Command, Event, FailCode, NetEnv, Reason, MAX_BATCH, MAX_COMMANDS, MAX_DATA, MAX_DETAIL,
+    MAX_TICKET,
+};
 use kuula_core::save::{SLOT_BYTES, SLOT_COUNT};
 use kuula_core::{
     ConsoleState, Fault, FrameInput, FrameProfile, Snapshot, SnapshotLimits, PALETTE_SIZE,
@@ -66,16 +70,32 @@ const TAG_ERROR: u8 = 0x83;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Message {
-    /// Broker to worker: the whole cart and its save slots.
-    Load { snapshot: Snapshot, saves: Saves },
-    /// Broker to worker: run one frame with this input.
-    Step(FrameInput),
+    /// Broker to worker: the whole cart, its save slots and the
+    /// networking environment (permission and invite) of the run.
+    Load {
+        snapshot: Snapshot,
+        saves: Saves,
+        net: NetEnv,
+    },
+    /// Broker to worker: run one frame with this input and these
+    /// network events, at most `MAX_BATCH` of them.
+    Step {
+        input: FrameInput,
+        events: Vec<Event>,
+    },
     /// Broker to worker: exit.
     Stop,
     /// Worker to broker: loaded, screen is this size.
     Ready { width: u32, height: u32 },
-    /// Worker to broker: one frame, and the slots the cart wrote in it.
-    Frame { frame: OwnedFrame, saves: Saves },
+    /// Worker to broker: one frame, the slots the cart wrote in it, the
+    /// network commands it issued (at most `MAX_COMMANDS`) and how many
+    /// events its inbox has room for.
+    Frame {
+        frame: OwnedFrame,
+        saves: Saves,
+        commands: Vec<Command>,
+        net_room: u32,
+    },
     /// Worker to broker: something the worker could not do.
     Error { code: String, message: String },
 }
@@ -145,14 +165,81 @@ impl Writer {
             self.bytes(bytes);
         }
     }
+    fn events(&mut self, events: &[Event]) {
+        let events = &events[..events.len().min(MAX_BATCH)];
+        self.u32(events.len() as u32);
+        for e in events {
+            match e {
+                Event::Hosting { ticket } => {
+                    self.u8(EV_HOSTING);
+                    self.str(clip(ticket, MAX_TICKET));
+                }
+                Event::Connected { peer } => {
+                    self.u8(EV_CONNECTED);
+                    self.u32(*peer);
+                }
+                Event::Message { from, data } => {
+                    self.u8(EV_MESSAGE);
+                    self.u32(*from);
+                    self.bytes(&data[..data.len().min(MAX_DATA)]);
+                }
+                Event::Disconnected { reason } => {
+                    self.u8(EV_DISCONNECTED);
+                    self.str(reason.as_str());
+                }
+                Event::Failed { code, detail } => {
+                    self.u8(EV_FAILED);
+                    self.str(code.as_str());
+                    self.str(clip(detail, MAX_DETAIL));
+                }
+                Event::Permission { granted } => {
+                    self.u8(EV_PERMISSION);
+                    self.u8(*granted as u8);
+                }
+            }
+        }
+    }
+    fn commands(&mut self, commands: &[Command]) {
+        let commands = &commands[..commands.len().min(MAX_COMMANDS)];
+        self.u32(commands.len() as u32);
+        for c in commands {
+            match c {
+                Command::Host => self.u8(CMD_HOST),
+                Command::Join { ticket } => {
+                    self.u8(CMD_JOIN);
+                    self.str(clip(ticket, MAX_TICKET));
+                }
+                Command::Send { data } => {
+                    self.u8(CMD_SEND);
+                    self.bytes(&data[..data.len().min(MAX_DATA)]);
+                }
+                Command::Leave => self.u8(CMD_LEAVE),
+            }
+        }
+    }
 }
+
+const EV_HOSTING: u8 = 1;
+const EV_CONNECTED: u8 = 2;
+const EV_MESSAGE: u8 = 3;
+const EV_DISCONNECTED: u8 = 4;
+const EV_FAILED: u8 = 5;
+const EV_PERMISSION: u8 = 6;
+const CMD_HOST: u8 = 1;
+const CMD_JOIN: u8 = 2;
+const CMD_SEND: u8 = 3;
+const CMD_LEAVE: u8 = 4;
 
 /// Encode a message as one frame, ready to write.
 pub fn encode(msg: &Message) -> Vec<u8> {
     let mut w = Writer(Vec::new());
     w.u32(0); // length, patched below
     match msg {
-        Message::Load { snapshot, saves } => {
+        Message::Load {
+            snapshot,
+            saves,
+            net,
+        } => {
             w.u8(TAG_LOAD);
             w.u32(snapshot.len() as u32);
             for (name, data) in snapshot.entries() {
@@ -160,10 +247,13 @@ pub fn encode(msg: &Message) -> Vec<u8> {
                 w.bytes(data);
             }
             w.saves(saves);
+            w.u8(net.permitted as u8);
+            w.str(clip(net.invite.as_deref().unwrap_or(""), MAX_TICKET));
         }
-        Message::Step(input) => {
+        Message::Step { input, events } => {
             w.u8(TAG_STEP);
             w.u8(input.buttons);
+            w.events(events);
         }
         Message::Stop => w.u8(TAG_STOP),
         Message::Ready { width, height } => {
@@ -171,7 +261,12 @@ pub fn encode(msg: &Message) -> Vec<u8> {
             w.u32(*width);
             w.u32(*height);
         }
-        Message::Frame { frame: f, saves } => {
+        Message::Frame {
+            frame: f,
+            saves,
+            commands,
+            net_room,
+        } => {
             w.u8(TAG_FRAME);
             w.u64(f.frame);
             w.u32(f.width);
@@ -205,6 +300,8 @@ pub fn encode(msg: &Message) -> Vec<u8> {
                 w.0.extend_from_slice(&s.to_le_bytes());
             }
             w.saves(saves);
+            w.commands(commands);
+            w.u32(*net_room);
         }
         Message::Error { code, message } => {
             w.u8(TAG_ERROR);
@@ -276,6 +373,81 @@ impl<'a> Reader<'a> {
         }
         Ok(out)
     }
+    /// A peer number: only 1 exists.
+    fn peer(&mut self) -> Result<u32, ProtoError> {
+        match self.u32()? {
+            1 => Ok(1),
+            other => Err(ProtoError::new(format!("peer {other} refused"))),
+        }
+    }
+    /// Network events, each checked against the core's bounds.
+    fn events(&mut self) -> Result<Vec<Event>, ProtoError> {
+        let count = self.u32()? as usize;
+        if count > MAX_BATCH {
+            return Err(ProtoError::new(format!(
+                "{count} events, more than {MAX_BATCH}"
+            )));
+        }
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let e = match self.u8()? {
+                EV_HOSTING => Event::Hosting {
+                    ticket: self.str(MAX_TICKET)?,
+                },
+                EV_CONNECTED => Event::Connected { peer: self.peer()? },
+                EV_MESSAGE => Event::Message {
+                    from: self.peer()?,
+                    data: self.bytes(MAX_DATA)?.to_vec(),
+                },
+                EV_DISCONNECTED => Event::Disconnected {
+                    reason: Reason::parse(&self.str(16)?)
+                        .ok_or_else(|| ProtoError::new("unknown disconnect reason"))?,
+                },
+                EV_FAILED => Event::Failed {
+                    code: FailCode::parse(&self.str(MAX_CODE_BYTES)?)
+                        .ok_or_else(|| ProtoError::new("unknown failure code"))?,
+                    detail: self.str(MAX_DETAIL)?,
+                },
+                EV_PERMISSION => Event::Permission {
+                    granted: match self.u8()? {
+                        0 => false,
+                        1 => true,
+                        other => return Err(ProtoError::new(format!("bad flag {other}"))),
+                    },
+                },
+                other => return Err(ProtoError::new(format!("unknown event tag {other}"))),
+            };
+            e.check().map_err(ProtoError::new)?;
+            out.push(e);
+        }
+        Ok(out)
+    }
+    /// Network commands, each checked against the core's bounds.
+    fn commands(&mut self) -> Result<Vec<Command>, ProtoError> {
+        let count = self.u32()? as usize;
+        if count > MAX_COMMANDS {
+            return Err(ProtoError::new(format!(
+                "{count} commands, more than {MAX_COMMANDS}"
+            )));
+        }
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let c = match self.u8()? {
+                CMD_HOST => Command::Host,
+                CMD_JOIN => Command::Join {
+                    ticket: self.str(MAX_TICKET)?,
+                },
+                CMD_SEND => Command::Send {
+                    data: self.bytes(MAX_DATA)?.to_vec(),
+                },
+                CMD_LEAVE => Command::Leave,
+                other => return Err(ProtoError::new(format!("unknown command tag {other}"))),
+            };
+            c.check().map_err(ProtoError::new)?;
+            out.push(c);
+        }
+        Ok(out)
+    }
     fn done(&self) -> Result<(), ProtoError> {
         if self.pos == self.buf.len() {
             Ok(())
@@ -308,9 +480,26 @@ pub fn decode(body: &[u8]) -> Result<Message, ProtoError> {
             let snapshot = Snapshot::from_entries(entries, limits)
                 .map_err(|e| ProtoError::new(format!("snapshot: {e}")))?;
             let saves = r.saves()?;
-            Message::Load { snapshot, saves }
+            let permitted = match r.u8()? {
+                0 => false,
+                1 => true,
+                other => return Err(ProtoError::new(format!("bad flag {other}"))),
+            };
+            let invite = r.str(MAX_TICKET)?;
+            Message::Load {
+                snapshot,
+                saves,
+                net: NetEnv {
+                    permitted,
+                    invite: (!invite.is_empty()).then_some(invite),
+                },
+            }
         }
-        TAG_STEP => Message::Step(FrameInput::new(r.u8()?)),
+        TAG_STEP => {
+            let input = FrameInput::new(r.u8()?);
+            let events = r.events()?;
+            Message::Step { input, events }
+        }
         TAG_STOP => Message::Stop,
         TAG_READY => Message::Ready {
             width: r.u32()?,
@@ -374,6 +563,11 @@ pub fn decode(body: &[u8]) -> Result<Message, ProtoError> {
                 .map(|b| i16::from_le_bytes(*b))
                 .collect();
             let saves = r.saves()?;
+            let commands = r.commands()?;
+            let net_room = r.u32()?;
+            if net_room as usize > MAX_BATCH {
+                return Err(ProtoError::new(format!("net room {net_room} refused")));
+            }
             Message::Frame {
                 frame: OwnedFrame {
                     frame,
@@ -387,6 +581,8 @@ pub fn decode(body: &[u8]) -> Result<Message, ProtoError> {
                     audio,
                 },
                 saves,
+                commands,
+                net_room,
             }
         }
         TAG_ERROR => Message::Error {
@@ -445,12 +641,45 @@ mod tests {
         round_trip(Message::Load {
             snapshot: snap,
             saves: vec![(0, b"a".to_vec()), (7, vec![0; SLOT_BYTES])],
+            net: NetEnv {
+                permitted: true,
+                invite: Some("endpointabc".into()),
+            },
         });
         round_trip(Message::Load {
             snapshot: Snapshot::empty(),
             saves: Vec::new(),
+            net: NetEnv::default(),
         });
-        round_trip(Message::Step(FrameInput::new(0b101)));
+        round_trip(Message::Step {
+            input: FrameInput::new(0b101),
+            events: Vec::new(),
+        });
+        round_trip(Message::Step {
+            input: FrameInput::NONE,
+            events: vec![
+                Event::Hosting {
+                    ticket: "t".repeat(MAX_TICKET),
+                },
+                Event::Connected { peer: 1 },
+                Event::Message {
+                    from: 1,
+                    data: vec![0, 255, 7],
+                },
+                Event::Message {
+                    from: 1,
+                    data: vec![9; MAX_DATA],
+                },
+                Event::Disconnected {
+                    reason: Reason::Lost,
+                },
+                Event::Failed {
+                    code: FailCode::QueueFull,
+                    detail: "full".into(),
+                },
+                Event::Permission { granted: false },
+            ],
+        });
         round_trip(Message::Stop);
         round_trip(Message::Ready {
             width: 320,
@@ -461,6 +690,8 @@ mod tests {
         let plain = |frame: OwnedFrame| Message::Frame {
             frame,
             saves: Vec::new(),
+            commands: Vec::new(),
+            net_room: 0,
         };
         round_trip(Message::Frame {
             frame: OwnedFrame {
@@ -475,6 +706,15 @@ mod tests {
                 state: ConsoleState::Running,
             },
             saves: vec![(3, vec![9; 10])],
+            commands: vec![
+                Command::Host,
+                Command::Join {
+                    ticket: "endpointx".into(),
+                },
+                Command::Send { data: vec![1, 2] },
+                Command::Leave,
+            ],
+            net_room: MAX_BATCH as u32,
         });
         round_trip(plain(OwnedFrame {
             frame: 8,
@@ -542,6 +782,8 @@ mod tests {
                 )),
             },
             saves: Vec::new(),
+            commands: Vec::new(),
+            net_room: 0,
         };
         let bytes = encode(&msg);
         let back = decode(&bytes[4..]).unwrap();
@@ -574,10 +816,14 @@ mod tests {
         let base = encode(&Message::Load {
             snapshot: Snapshot::empty(),
             saves: Vec::new(),
+            net: NetEnv::default(),
         });
+        // Drop the empty saves count and the net env (1 + 4 bytes).
         let with = |tail: &[u8]| {
-            let mut body = base[4..base.len() - 4].to_vec();
+            let mut body = base[4..base.len() - 4 - 5].to_vec();
             body.extend_from_slice(tail);
+            body.push(0);
+            body.extend_from_slice(&0u32.to_le_bytes());
             decode(&body)
         };
         let mut nine = 9u32.to_le_bytes().to_vec();
@@ -604,6 +850,71 @@ mod tests {
     }
 
     #[test]
+    fn bad_network_fields_are_rejected() {
+        let step = |events: &[u8]| {
+            let mut body = vec![TAG_STEP, 0];
+            body.extend_from_slice(events);
+            decode(&body)
+        };
+        // Too many events.
+        assert!(step(&(MAX_BATCH as u32 + 1).to_le_bytes()).is_err());
+        // Peer 0.
+        let mut ev = 1u32.to_le_bytes().to_vec();
+        ev.push(EV_CONNECTED);
+        ev.extend_from_slice(&0u32.to_le_bytes());
+        assert!(step(&ev).is_err());
+        // Empty data.
+        let mut ev = 1u32.to_le_bytes().to_vec();
+        ev.push(EV_MESSAGE);
+        ev.extend_from_slice(&1u32.to_le_bytes());
+        ev.extend_from_slice(&0u32.to_le_bytes());
+        assert!(step(&ev).is_err());
+        // Oversized data is refused from the length alone.
+        let mut ev = 1u32.to_le_bytes().to_vec();
+        ev.push(EV_MESSAGE);
+        ev.extend_from_slice(&1u32.to_le_bytes());
+        ev.extend_from_slice(&(MAX_DATA as u32 + 1).to_le_bytes());
+        ev.extend(vec![0u8; MAX_DATA + 1]);
+        assert!(step(&ev).is_err());
+        // An unknown failure code.
+        let mut ev = 1u32.to_le_bytes().to_vec();
+        ev.push(EV_FAILED);
+        ev.extend_from_slice(&5u32.to_le_bytes());
+        ev.extend_from_slice(b"net_x");
+        ev.extend_from_slice(&0u32.to_le_bytes());
+        assert!(step(&ev).is_err());
+        // An unknown tag.
+        let mut ev = 1u32.to_le_bytes().to_vec();
+        ev.push(99);
+        assert!(step(&ev).is_err());
+        // A frame with too many commands or too much room.
+        let base = encode(&Message::Frame {
+            frame: OwnedFrame {
+                frame: 1,
+                width: 1,
+                height: 1,
+                pixels: vec![0],
+                palette: [[0; 3]; PALETTE_SIZE],
+                profile: FrameProfile::default(),
+                log: vec![],
+                audio: vec![],
+                state: ConsoleState::Running,
+            },
+            saves: Vec::new(),
+            commands: Vec::new(),
+            net_room: 0,
+        });
+        let body = &base[4..];
+        let mut many = body[..body.len() - 8].to_vec();
+        many.extend_from_slice(&(MAX_COMMANDS as u32 + 1).to_le_bytes());
+        many.extend_from_slice(&0u32.to_le_bytes());
+        assert!(decode(&many).is_err());
+        let mut room = body[..body.len() - 4].to_vec();
+        room.extend_from_slice(&(MAX_BATCH as u32 + 1).to_le_bytes());
+        assert!(decode(&room).is_err());
+    }
+
+    #[test]
     fn bad_frames_are_rejected() {
         let mut oversized = (MAX_FRAME as u32 + 1).to_le_bytes().to_vec();
         oversized.push(TAG_STOP);
@@ -619,6 +930,7 @@ mod tests {
         assert!(decode(&[0x7f]).is_err(), "unknown tag");
         assert!(decode(&[TAG_STOP, 0]).is_err(), "trailing byte");
         assert!(decode(&[TAG_STEP]).is_err(), "short payload");
+        assert!(decode(&[TAG_STEP, 0]).is_err(), "a step without its events");
         // A frame claiming a huge size fails before allocating pixels.
         let mut body = vec![TAG_FRAME];
         body.extend_from_slice(&1u64.to_le_bytes());

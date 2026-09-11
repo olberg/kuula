@@ -4,9 +4,11 @@ use crate::LuaGuest;
 use kuula_core::input::{BTN_A, BTN_UP};
 use kuula_core::{Console, DrawState, FrameInput, Guest, Snapshot, SnapshotLimits};
 
+mod api;
 mod audio;
 mod gfx;
 mod meter;
+mod net;
 mod numeric;
 mod saves;
 mod shell;

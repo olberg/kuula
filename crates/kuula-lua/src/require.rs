@@ -4,6 +4,8 @@
 
 use std::fmt;
 
+use crate::api::reg::Reg;
+use crate::api::{Group, Price, Scope, Sig};
 use crate::bindings::with_ctx;
 use crate::meter::charge;
 use kuula_core::meter::price;
@@ -85,15 +87,33 @@ pub fn module_path(name: &str) -> std::result::Result<String, RequireError> {
     Ok(format!("src/{}.lua", name.replace('.', "/")))
 }
 
-pub fn install(lua: &Lua) -> Result<()> {
-    lua.set_named_registry_value(LOADED, lua.create_table()?)?;
-    lua.set_named_registry_value(LOADING, lua.create_table()?)?;
-    lua.globals().set(
-        "require",
-        lua.create_function(|lua, name: String| require(lua, &name))?,
-    )?;
-    Ok(())
+pub(crate) fn install(reg: &mut Reg<'_>) -> Result<()> {
+    reg.setup(|lua| {
+        lua.set_named_registry_value(LOADED, lua.create_table()?)?;
+        lua.set_named_registry_value(LOADING, lua.create_table()?)
+    })?;
+    reg.function(&REQUIRE, |lua, name: String| require(lua, &name))
 }
+
+binding!(REQUIRE {
+    name: "require",
+    scope: Scope::Global,
+    group: Group::Modules,
+    sigs: &[Sig::new(
+        "require(name)",
+        "what `src/<name with . as />.lua` returned (or `true`), loaded once",
+    )],
+    price: Price::Compile,
+    errors: &[
+        "module_name_invalid",
+        "module_not_found",
+        "require_cycle",
+        "require_limit",
+        "module_not_utf8",
+    ],
+    doc: "Names are letters, digits and `_` joined by `.`; at most 256 \
+          modules; a cycle is an error.",
+});
 
 /// Number of key/value pairs in a table, whatever the keys are.
 fn entries(t: &Table) -> Result<usize> {
