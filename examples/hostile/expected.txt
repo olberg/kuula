@@ -14,3 +14,6 @@ finalizer runtime_error
 draw budget_exceeded
 net_flood budget_exceeded
 net_ticket runtime_error
+omc_inflate song_error
+omc_samples sample_error
+omc_chunks budget_exceeded

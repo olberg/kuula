@@ -4,17 +4,17 @@
 
 use std::rc::Rc;
 
-use super::tracker::{self, Track};
+use super::songs::{self, PlayableSong};
 use super::AudioError;
 use crate::draw::DrawState;
 use crate::manifest::valid_asset_name;
 
 pub fn sfx_path(name: &str) -> String {
-    format!("sfx/{name}.trk")
+    format!("sfx/{name}.omc")
 }
 
 pub fn music_path(name: &str) -> String {
-    format!("music/{name}.trk")
+    format!("music/{name}.omc")
 }
 
 pub fn sample_path(name: &str) -> String {
@@ -34,45 +34,60 @@ impl DrawState {
         })
     }
 
-    /// Decode `samples/<name>.wav` into the bank, or return the cached one.
+    /// Decode `samples/<name>.wav` into the bank, or return the cached
+    /// one. A file that was refused is not read again.
     pub fn load_sample(&mut self, name: &str) -> Result<Rc<super::sample::Sample>, AudioError> {
         let path = sample_path(name);
         if let Some(s) = self.audio.samples().get(&path) {
             return Ok(s);
         }
+        if let Some(e) = self.audio.refused(&path) {
+            return Err(e);
+        }
         let bytes = self.read_asset(&path, name)?;
-        self.audio.samples_mut().insert(&path, &bytes)
+        match self.audio.samples_mut().insert(&path, &bytes) {
+            Ok(sample) => Ok(sample),
+            Err(e) => Err(self.audio.refuse(&path, e)),
+        }
     }
 
-    /// Parse a track at `path` and load every sample it names, or return
-    /// the cached one.
-    fn load_track(&mut self, path: &str, name: &str) -> Result<Rc<Track>, AudioError> {
-        if let Some(t) = self.audio.cached_track(path) {
-            return Ok(t);
+    /// Read the song at `path`, or return the cached one. A refused load
+    /// changes nothing but that it is remembered: both budgets are charged
+    /// only once it is accepted, and the file is not read again.
+    fn load_song(&mut self, path: &str, name: &str) -> Result<PlayableSong, AudioError> {
+        if let Some(s) = self.audio.cached_song(path) {
+            return Ok(s);
+        }
+        if let Some(e) = self.audio.refused(path) {
+            return Err(e);
         }
         let bytes = self.read_asset(path, name)?;
-        let track = tracker::parse(path, &bytes)?;
-        let samples: Vec<String> = track.sample_names().map(str::to_string).collect();
-        for s in samples {
-            self.load_sample(&s)?;
+        match songs::load(
+            path,
+            &bytes,
+            self.audio.song_room(),
+            self.audio.samples().room(),
+        ) {
+            Ok(loaded) => Ok(self.audio.add_song(path, &loaded)),
+            Err(e) => Err(self.audio.refuse(path, e)),
         }
-        Ok(self.audio.cache_track(path, track))
     }
 
-    /// `sfx(name, channel?)`: play `sfx/<name>.trk`. Returns the channel.
+    /// `sfx(name, channel?)`: play `sfx/<name>.omc`. Returns the first
+    /// channel it took.
     pub fn sfx(&mut self, name: &str, channel: Option<i64>) -> Result<usize, AudioError> {
         let path = sfx_path(name);
-        let track = self.load_track(&path, name)?;
-        self.audio.play_sfx(&path, track, channel)
+        let song = self.load_song(&path, name)?;
+        self.audio.play_effect(&path, &song, channel)
     }
 
-    /// `music(name, fade?)`: play `music/<name>.trk` on the low channels;
+    /// `music(name, fade?)`: play `music/<name>.omc` on the low channels;
     /// `None` fades the current music out over `fade` frames.
     pub fn music(&mut self, name: Option<&str>, fade: u32) -> Result<(), AudioError> {
         match name {
             Some(name) => {
-                let track = self.load_track(&music_path(name), name)?;
-                self.audio.play_music(track, fade);
+                let song = self.load_song(&music_path(name), name)?;
+                self.audio.play_music(&song, fade);
             }
             None => self.audio.stop_music(fade),
         }
@@ -90,8 +105,8 @@ impl DrawState {
         self.audio.play_sample(sample, channel, pitch)
     }
 
-    /// `volume(channel, v)` with `v` already scaled to 0..=255.
-    pub fn volume(&mut self, channel: i64, v: u8) -> Result<(), AudioError> {
+    /// `volume(channel, v)` with `v` already scaled to 0..=256.
+    pub fn volume(&mut self, channel: i64, v: u16) -> Result<(), AudioError> {
         self.audio.set_volume(channel, v)
     }
 }
@@ -100,6 +115,7 @@ impl DrawState {
 mod tests {
     use super::*;
     use crate::audio::sample::encode_wav;
+    use crate::audio::testsong::{omc, Song};
     use crate::snapshot::{Snapshot, SnapshotLimits};
     use crate::source::CartSource;
 
@@ -110,34 +126,29 @@ mod tests {
     }
 
     #[test]
-    fn loads_tracks_and_samples_by_name_with_caching() {
+    fn loads_songs_and_samples_by_name_with_caching() {
         let mut d = state(vec![
-            (
-                "sfx/hit.trk",
-                b"tempo 2\ninst 1 pulse\ninst 2 sample=kick\nC-4 1\nC-4 2\n".to_vec(),
-            ),
-            (
-                "music/song.trk",
-                b"loop 0\ninst 1 saw\nC-3 1|E-3 1\n".to_vec(),
-            ),
+            ("sfx/hit.omc", omc(&Song::new(2).ticks(6))),
+            ("music/song.omc", omc(&Song::new(1).looping())),
             (
                 "samples/kick.wav",
                 encode_wav(22050, 8, 1, &[0, 255, 0, 255]),
             ),
-            ("sfx/bad.trk", b"inst 1 sample=nope\nC-4 1\n".to_vec()),
+            ("sfx/bad.omc", b"not a container".to_vec()),
         ]);
-        assert_eq!(d.sfx("hit", None).unwrap(), 7);
-        assert_eq!(d.audio.samples().used(), 4);
+        assert_eq!(d.sfx("hit", None).unwrap(), 6);
         assert_eq!(d.sfx("hit", Some(1)).unwrap(), 1);
+        assert!(d.audio.songs().used() > 0);
         assert_eq!(d.sfx("nope", None).unwrap_err().code(), "asset_not_found");
         assert_eq!(d.sfx("../x", None).unwrap_err().code(), "asset_invalid");
-        assert_eq!(d.sfx("bad", None).unwrap_err().code(), "asset_not_found");
+        assert_eq!(d.sfx("bad", None).unwrap_err().code(), "song_error");
         d.music(Some("song"), 0).unwrap();
         assert!(d.audio.music_playing());
         d.music(None, 0).unwrap();
         assert!(!d.audio.music_playing());
         d.audio.stop_all();
         assert_eq!(d.sample("kick", Some(3), 1 << 16).unwrap(), 3);
+        assert_eq!(d.audio.samples().used(), 4);
         assert_eq!(
             d.sample("kick", Some(9), 1 << 16).unwrap_err().code(),
             "audio_bad_channel"

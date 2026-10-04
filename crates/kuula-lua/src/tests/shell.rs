@@ -35,6 +35,7 @@ fn shell_console(carts: &[(&str, &str)]) -> Console {
         .map(|(n, _)| CartEntry {
             name: n.clone(),
             title: n.to_uppercase(),
+            ..CartEntry::default()
         })
         .collect();
     let opener: kuula_core::console::CartOpener = Rc::new(move |name: &str| {
@@ -61,6 +62,32 @@ fn shell_console(carts: &[(&str, &str)]) -> Console {
 fn press(c: &mut Console, bits: u8) {
     c.step(FrameInput::new(bits));
     c.step(FrameInput::NONE);
+}
+
+#[test]
+fn first_startup_a_never_launches_a_cart_even_after_waiting() {
+    for delay in [2, 90, 92, 180] {
+        let mut c = shell_console(&[("hello", HELLO)]);
+        steps(&mut c, delay);
+        c.step(FrameInput::new(BTN_A));
+        assert_eq!(
+            c.frame(),
+            0,
+            "first A launched a cart after waiting {delay} frames"
+        );
+        steps_with(&mut c, BTN_A, 20);
+        assert_eq!(
+            c.frame(),
+            0,
+            "held first A launched the cart after startup delay {delay}"
+        );
+        c.step(FrameInput::NONE);
+        press(&mut c, BTN_A);
+        assert!(
+            c.frame() > 0,
+            "a fresh second A should run the selected cart"
+        );
+    }
 }
 
 fn steps(c: &mut Console, n: usize) {
@@ -163,6 +190,59 @@ fn a_faulting_cart_gets_the_shells_error_screen_and_restarts() {
     assert_eq!(c.frame(), 0);
 }
 
+/// The host's reload path (a deployed cart): `load_cart` on a console that
+/// is already running a cart tears that guest down and starts the new one
+/// from frame 0, over a running cart, over a faulted one, and with a new
+/// cart that cannot start.
+#[test]
+fn load_cart_replaces_a_running_cart_and_starts_the_new_one() {
+    const NEXT: &str = "n = 0\nfunction _update(dt) n = n + 1 end\nfunction _draw() cls(5) end\n";
+    let load = |c: &mut Console, src: &str| {
+        c.load_cart(
+            cart(&[("main.lua", src.as_bytes())]) as Rc<dyn kuula_core::CartSource>,
+            Box::new(MemoryStore::new()),
+        );
+    };
+    let mut c = shell_console(&[("hello", HELLO)]);
+    boot_and_run(&mut c);
+    steps(&mut c, 5);
+    assert!(c.frame() >= 5);
+    assert!(
+        c.output().screen.iter().all(|&p| p == 2),
+        "the old cart draws"
+    );
+
+    load(&mut c, NEXT);
+    assert!(c.state().fault().is_none(), "{:?}", c.state());
+    assert_eq!(c.frame(), 0, "the new cart starts from its first frame");
+    steps(&mut c, 3);
+    assert_eq!(c.frame(), 3);
+    assert!(
+        c.output().screen.iter().all(|&p| p == 5),
+        "the new cart draws"
+    );
+    assert!(c.shell_fault().is_none());
+    assert!(!c.is_paused());
+
+    // Over a faulted cart.
+    load(&mut c, "function _update(dt) error('bang') end");
+    steps(&mut c, 2);
+    assert!(c.state().fault().is_some(), "the cart faulted");
+    load(&mut c, NEXT);
+    assert!(
+        c.state().fault().is_none(),
+        "a fresh cart replaces the faulted one"
+    );
+    steps(&mut c, 2);
+    assert_eq!(c.frame(), 2);
+
+    // A new cart that cannot start is a fault the host can report.
+    load(&mut c, "this is not lua");
+    let fault = c.state().fault().cloned().expect("the new cart faulted");
+    assert!(!fault.code.is_empty());
+    assert!(c.shell_fault().is_none(), "the shell itself is fine");
+}
+
 #[test]
 fn the_cart_has_no_sys_and_the_shell_has_no_cart_authority_leak() {
     let mut c = shell_console(&[(
@@ -224,4 +304,176 @@ fn a_huge_fault_message_does_not_kill_the_shell() {
     assert!(out.screen.contains(&15), "the error screen is drawn");
     press(&mut c, BTN_B);
     assert!(c.state().fault().is_none(), "B still quits to the list");
+}
+
+fn network_console() -> Console {
+    let source = cart(&[
+        (
+            "main.lua",
+            br#"
+n = 0; presses = 0; invitation = ''
+function _init() invitation = net.invite() or 'host' end
+function _update()
+ n = n + 1
+ if n == 1 then if net.invite() then net.join(net.invite()) else net.host() end end
+ if btn(4) then presses = presses + 1 end
+ while net.recv() do end
+end
+function _draw() cls(2) end
+"#,
+        ),
+        ("cart.toml", b"[cart]\nservices = [\"net\"]\n"),
+    ]);
+    let opener: kuula_core::console::CartOpener =
+        Rc::new(move |_| Ok((source.clone(), Box::new(MemoryStore::new()))));
+    Console::with_shell(
+        Box::new(LuaGuest::new_shell(ROM, "rom/main.lua").unwrap()),
+        vec![CartEntry {
+            name: "net".into(),
+            title: "Network cart".into(),
+            network: true,
+            ..Default::default()
+        }],
+        Settings::default(),
+        opener,
+        Rc::new(LuaGuest::factory),
+        kuula_core::Preload::Decode,
+    )
+}
+
+fn network_menu(c: &mut Console) {
+    steps(c, 2);
+    press(c, BTN_A);
+    press(c, BTN_A);
+    assert!(c.network_view().unwrap().overlay);
+    assert_eq!(c.frame(), 0);
+}
+
+#[test]
+fn a_host_without_networking_says_so_and_offers_only_back() {
+    let mut c = network_console();
+    network_menu(&mut c);
+    c.network_view_mut().unwrap().unavailable = "no networking here".into();
+    // "host game" would have asked for permission or started the cart.
+    press(&mut c, BTN_A);
+    assert!(!c.network_view().unwrap().overlay, "A goes back");
+    assert_eq!(c.frame(), 0, "no cart was started");
+}
+
+#[test]
+fn the_host_can_correct_the_scale_the_settings_show() {
+    let mut c = network_console();
+    steps(&mut c, 2);
+    assert_eq!(c.settings().scale, Settings::default().scale);
+    c.set_effective_scale(1);
+    assert_eq!(c.settings().scale, 1);
+}
+
+#[test]
+fn network_permission_host_cancel_retry_and_gameplay_input_isolation() {
+    use kuula_core::net::{Event, Status};
+    let mut c = network_console();
+    network_menu(&mut c);
+    press(&mut c, BTN_A); // host -> permission
+    assert!(!c.settings().net);
+    assert_eq!(c.frame(), 0);
+    press(&mut c, BTN_A); // approve -> menu
+    assert!(c.settings().net);
+    press(&mut c, BTN_A); // host
+    steps(&mut c, 3);
+    assert_eq!(c.net_state().unwrap().status, Status::Hosting);
+    let frame = c.frame();
+    steps(&mut c, 3);
+    assert!(
+        c.frame() > frame,
+        "connection overlay must keep the cart stepping"
+    );
+    c.step_with(FrameInput::NONE, vec![Event::Connected { peer: 1 }]);
+    c.step(FrameInput::new(BTN_A)); // enter game
+    steps_with(&mut c, BTN_A, 3);
+    assert!(!c.network_view().unwrap().overlay);
+    assert!(c
+        .state_dump(&["presses".into()])
+        .unwrap()
+        .contains("presses = 0"));
+    c.step(FrameInput::NONE);
+    press(&mut c, BTN_A);
+    assert!(c
+        .state_dump(&["presses".into()])
+        .unwrap()
+        .contains("presses = 1"));
+    c.step_with(
+        FrameInput::NONE,
+        vec![Event::Disconnected {
+            reason: kuula_core::net::Reason::Lost,
+        }],
+    );
+    steps(&mut c, 2);
+    assert!(c.network_view().unwrap().overlay);
+    press(&mut c, BTN_B);
+    assert_eq!(c.frame(), 0);
+    press(&mut c, BTN_A);
+    steps(&mut c, 3);
+    assert_eq!(c.net_state().unwrap().status, Status::Hosting);
+    assert!(c.network_view().unwrap().detail.is_empty());
+    assert!(c.shell_fault().is_none(), "{:?}", c.shell_fault());
+}
+
+/// A cart the host starts while the shell is on a network screen gets
+/// its buttons: the overlay that screen held goes with it.
+#[test]
+fn a_host_started_cart_gets_input_from_a_network_screen() {
+    const COUNTS: &str = r#"
+presses = 0
+function _update(dt) if btn(4) then presses = presses + 1 end end
+function _draw() cls(5) end
+"#;
+    let mut c = network_console();
+    network_menu(&mut c);
+    c.host_load_cart(
+        cart(&[("main.lua", COUNTS.as_bytes())]) as Rc<dyn kuula_core::CartSource>,
+        Box::new(MemoryStore::new()),
+    );
+    steps(&mut c, 2);
+    assert!(
+        !c.network_view().unwrap().overlay,
+        "the network screen's overlay is gone"
+    );
+    assert!(c.output().screen.iter().all(|&p| p == 5), "the cart shows");
+    press(&mut c, BTN_A);
+    assert!(c
+        .state_dump(&["presses".into()])
+        .unwrap()
+        .contains("presses = 1"));
+    assert!(c.shell_fault().is_none(), "{:?}", c.shell_fault());
+}
+
+#[test]
+fn ticket_entry_and_relay_menu_draw_without_shell_faults() {
+    use kuula_core::input::BTN_DOWN;
+    let mut c = network_console();
+    network_menu(&mut c);
+    press(&mut c, BTN_A);
+    press(&mut c, BTN_A); // permission
+    press(&mut c, BTN_DOWN);
+    press(&mut c, BTN_A); // ticket entry
+    c.network_view_mut().unwrap().text = "example-ticket".into();
+    steps(&mut c, 2);
+    press(&mut c, BTN_A); // done, launches with invite
+    steps(&mut c, 3);
+    assert_eq!(
+        c.net_state().unwrap().invite.as_deref(),
+        Some("example-ticket")
+    );
+    assert!(c
+        .state_dump(&["invitation".into()])
+        .unwrap()
+        .contains("example-ticket"));
+    press(&mut c, BTN_B);
+    assert_eq!(c.frame(), 0);
+    press(&mut c, BTN_DOWN);
+    press(&mut c, BTN_DOWN);
+    press(&mut c, BTN_A); // relay entry
+    steps(&mut c, 2);
+    assert!(c.shell_fault().is_none(), "{:?}", c.shell_fault());
 }

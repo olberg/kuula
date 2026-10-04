@@ -7,7 +7,7 @@ use crate::api::{Group, Price, Scope, Sig};
 use crate::bindings::with_ctx;
 use crate::meter::charge;
 use crate::FrameCtx;
-use kuula_core::audio::AudioError;
+use kuula_core::audio::{AudioError, GAIN_ONE};
 use kuula_core::buf::to_int;
 use kuula_core::Category;
 use mlua::{Error, Lua, Result, Value};
@@ -26,12 +26,13 @@ fn channel(v: Option<f64>) -> Option<i64> {
     v.map(to_int)
 }
 
-/// A volume 0..1 as 0..=255; out-of-range values clamp.
-fn gain(v: f64) -> u8 {
+/// A volume 0..1 as 0..=256, where 256 is unity; out-of-range values
+/// clamp.
+fn gain(v: f64) -> u16 {
     if v.is_nan() {
         return 0;
     }
-    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+    (v.clamp(0.0, 1.0) * GAIN_ONE as f64).round() as u16
 }
 
 /// A pitch multiplier as 16.16; out-of-range values clamp to 1/256..=16.
@@ -71,12 +72,20 @@ pub(crate) fn install(reg: &mut Reg<'_>) -> Result<()> {
     Ok(())
 }
 
-const AUDIO_ERRORS: &[&str] = &[
+const SFX_ERRORS: &[&str] = &[
     "asset_not_found",
     "asset_invalid",
-    "track_error",
+    "song_error",
+    "sample_error",
     "audio_bad_channel",
     "audio_no_room",
+];
+
+const MUSIC_ERRORS: &[&str] = &[
+    "asset_not_found",
+    "asset_invalid",
+    "song_error",
+    "sample_error",
 ];
 
 binding!(SFX {
@@ -86,8 +95,8 @@ binding!(SFX {
     sigs: &[Sig::new("sfx(name, [channel])", "the channel it plays on",)],
     price: Price::One,
     defaults: &[("channel", "a free one")],
-    errors: AUDIO_ERRORS,
-    doc: "`name` is the stem of `sfx/<name>.trk`.",
+    errors: SFX_ERRORS,
+    doc: "`name` is the stem of `sfx/<name>.omc`.",
 });
 
 binding!(MUSIC {
@@ -97,18 +106,18 @@ binding!(MUSIC {
     sigs: &[
         Sig::new(
             "music(name, [fade])",
-            "nothing; starts the track, fading over `fade` frames",
+            "nothing; starts the song, fading in over `fade` frames",
         ),
-        Sig::new("music()", "nothing; stops the track"),
+        Sig::new("music()", "nothing; stops the music"),
         Sig::new(
             "music(nil, fade)",
-            "nothing; stops the track over `fade` frames"
+            "nothing; fades the music out over `fade` frames"
         ),
     ],
     price: Price::One,
     defaults: &[("fade", "0")],
-    errors: AUDIO_ERRORS,
-    doc: "`name` is the stem of `music/<name>.trk`.",
+    errors: MUSIC_ERRORS,
+    doc: "`name` is the stem of `music/<name>.omc`.",
 });
 
 binding!(SAMPLE {
@@ -149,8 +158,10 @@ mod tests {
 
     #[test]
     fn arguments_are_scaled_and_clamped() {
-        assert_eq!(gain(1.0), 255);
+        assert_eq!(gain(1.0), 256);
         assert_eq!(gain(0.5), 128);
+        assert_eq!(gain(0.3), 77);
+        assert_eq!(gain(0.0), 0);
         assert_eq!(gain(-3.0), 0);
         assert_eq!(gain(f64::NAN), 0);
         assert_eq!(pitch(None), 65536);

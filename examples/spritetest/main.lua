@@ -27,8 +27,11 @@ end
 function _draw()
   cls(0)
   Swarm.frame(swarm, draw_sprite)
-  rectfill(0, 0, 639, 39, 0)
-  print('ALIEN SPRITE TEST  SPRITES ' .. #swarm.sprites, 8, 6, 7)
-  print('A AUTO/PAUSE  B RESET  UP/DOWN +/-32', 8, 16, 7)
-  print('AUTO ' .. tostring(automatic) .. '  HOST BENCH FINDS 60/30 FPS', 8, 26, 7)
+  -- Colour 0 is transparent for the sprites; make it solid for the band.
+  palt(0, false)
+  rectfill(0, 0, 639, 55, 0)
+  palt(0, true)
+  print('ALIEN SPRITE TEST  SPRITES ' .. #swarm.sprites, 8, 4, 7)
+  print('A AUTO/PAUSE  B RESET  UP/DOWN +/-32', 8, 20, 7)
+  print('AUTO ' .. tostring(automatic) .. '  HOST BENCH FINDS 60/30 FPS', 8, 36, 7)
 end

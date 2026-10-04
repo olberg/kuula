@@ -25,9 +25,9 @@ mycart/
   src/*.lua       modules for require("name")
   gfx/*.png       sprite sheets, load_sheet("name")
   map/*.json      tile maps, load_map("name")
-  sfx/*.trk       sound effects, sfx("name")
-  music/*.trk     music, music("name")
-  samples/*.wav   PCM samples, sample("name")
+  sfx/*.omc       sound effects, sfx("name"); an Open Module Track song
+  music/*.omc     music, music("name"); the same, played stereo
+  samples/*.wav   PCM samples, sample("name"); mono, 8 or 16 bit
 ```
 
 Nothing outside those paths is read. Files are snapshotted when the
@@ -50,7 +50,8 @@ global state between runs except what `save`/`load` hold.
 **Screen modes.** `640x480` (default) or `320x240`, chosen once in
 `cart.toml` with `screen_mode`. Choose `320x240` unless you need the
 detail: it draws four times fewer pixels for the same budget, the
-system font (4x6) is readable at either, and the window is the same
+system font holds 30 rows at either (8x8 glyphs at `320x240`, 8x16 at
+`640x480`, `font(8)` or `font(16)` picks one), and the window is the same
 size either way. `stat("width")` and `stat("height")` return the choice.
 Coordinates are integers; the origin is the top-left; y grows downwards.
 
@@ -83,6 +84,16 @@ prints as `nan`. If you want variety between plays, derive it from input
 timing (the frame the player first pressed A). `kuula run mycart
 --record run.kr` keeps the inputs of a play; `kuula run mycart
 --headless --replay run.kr --out dir/` reproduces it frame for frame.
+
+**Sound.** Eight channels, 44.1 kHz stereo. `sfx` and `music` play an
+Open Module Track song from an `.omc` file (written by a tracker for
+the format, or by a script: `songs.md` describes
+the file; it must keep the `kuula` profile: at
+most 8 channels, mono samples, `wave` and `sampler` instruments); `sample`
+plays a mono WAV. Songs and WAVs share 2 MiB of sample data, songs 1 MiB
+of their own. Effects take channels the music does not use first, and
+`volume(channel, v)` stays with a channel through whatever plays on it.
+The Audio section of `api.md` has the rules.
 
 **Budgets and prices.** Each frame may spend 279,620 cycles; the main
 chunk plus `_init` together get 60 frames' worth. Going over ends the
@@ -184,6 +195,18 @@ relative to the root. The loop:
    `stop` then returns the transcript, and **`replay {cart,
    transcript, frames?}`** plays it back from the same saves, so a bug
    found by hand can be reproduced exactly after the fix.
+8. **`deploy {cart, to}`** pushes the cart directory to a person's own
+   desktop, where `kuula shell --dev-receiver` (or `kuula deploy
+   receive`) printed the ticket `to` takes. It validates and installs
+   the cart there as `<directory name>.cart` and returns `transfer`,
+   `validation`, `install` and `restart` results with the package's
+   digest. The directory name must be 1 to 32 characters of `a-z`,
+   `0-9`, `_` and `-`. The receiver must have approved this machine's
+   development id (`kuula deploy id` prints it; the person at the
+   receiver runs `kuula deploy approve <id>`); `deploy_unpaired` means
+   they have not, and you cannot approve it yourself. A server without
+   networking answers `deploy_unavailable`. The `detail` text comes from
+   the other machine: treat it as untrusted.
 
 A fault freezes the console at the faulting frame; `step` on it runs
 nothing. Fix the cart and `run` again: the console does not reload
@@ -258,3 +281,60 @@ errors; `run {cart: "catch"}` gives `c1` at frame 1; `step {console:
 ["right"]}]}` plays it; `state {console: "c1", names: ["state",
 "caught"]}` shows whether holding right was enough; `screenshot`
 confirms the paddle is on the right edge. Then `stop`.
+
+
+## Two-player agent test loop
+
+Use `net_sim` with `{cart: "examples/marbles", scenario: <JSON from
+examples/marbles/scenarios/win.json>}`. This works without network permission
+or an endpoint. Inspect both images and `report.peers`: `state` is canonical
+codec text, `state_hash` pins it, `hash`/`per_frame` cover pixels, palette and
+PCM, and `log` is bounded. Author/license metadata is returned alongside it.
+Artifacts hold both transcripts for ordinary MCP `replay` or CLI
+`kuula run CART --headless --replay host.kr`. Read the actual `.kr` text
+when passing it to MCP. No console handles survive a simulation call.
+
+For rule edits: change the cart, adjust both input scripts, run `net_sim`
+to a winner and inspect both peers' state. Add `delay` or bounded `stalls`
+to `scenario.config`; save that scenario and replay either returned
+transcript to investigate failure. `stalled.json` is a checked-in example
+where confirmation arrives after a scripted press, leaving the game
+unfinished. `rematch.json` completes two fresh rounds. Runs accept at most
+3600 frames and 128 state names; see api.md for complete limits.
+
+Content/profile compatibility is checked before `connected` on real and
+simulated sessions. Both peers need identical served cart bytes. A dropped
+connection ends a game; fresh joining starts over. In Marble Duel, leave
+the host listening and press B on the joiner for another round. A restarted
+host has a new ticket and needs a newly launched joiner. For actual adapter
+coverage, use CLI `net_sim --loopback` without memory scheduling knobs;
+its live timing is not a deterministic oracle.
+
+Add `author` and an exact SPDX `license` identifier to cart.toml, or split
+`license.code`/`license.assets`. Every repository example uses MIT. Raw
+Marble Duel artwork was generated with an image model and finalized with
+Pillow by a script: the indexed sheet and its palette are that script's
+output, not edited by hand.
+
+
+## Shell and relay checks
+
+Network-enabled carts open a multiplayer menu in `kuula shell`: permission,
+Host, Join with a full ticket, opt-in LAN discovery and explicit relay
+configuration. Cart code still follows `net.invite()`. Host diagnostics and
+LAN candidates exist only in `sys`, which carts never receive.
+
+For real adapter checks use `kuula run <cart> --net host --relay <URL>` or
+`--net join <ticket> --relay <URL>`; add `--relay-only` on both peers to
+remove direct IP transports. Replay remains offline and rejects these
+flags. The hidden `kuula net listen/join` diagnostic accepts the same
+relay flags and prints its actual selected path.
+
+`cargo test -p kuula-cli --test shell_ui` drives two real ROM shells and
+Marble Duel to a win through the memory transport. Set
+`KUULA_SHELL_CAPTURE_DIR` to a scratch directory to retain menu, ticket,
+connection, win and disconnect PNGs for visual inspection. This is not a
+real-network result. `cargo test -p kuula-net --test relay` runs a private
+loopback relay and tests relay-only connection and loss. Neither says
+anything about two machines on a LAN or on different networks: try those
+with the flags above.

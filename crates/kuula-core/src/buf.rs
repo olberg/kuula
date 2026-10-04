@@ -1,5 +1,5 @@
-//! Typed 2D buffers: the one memory type a cart gets (architecture
-//! section 8). A sprite sheet, a map layer and the screen are all `Buf`s.
+//! Typed 2D buffers: the one memory type a cart gets. A sprite sheet, a
+//! map layer and the screen are all `Buf`s.
 
 use std::fmt;
 

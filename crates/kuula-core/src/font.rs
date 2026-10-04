@@ -1,201 +1,330 @@
-//! The built-in system font: 3x5 glyphs in a 4x6 cell, printable ASCII
-//! 32 to 126. Anything else draws a placeholder box. Drawing is in
+//! The system fonts: Unscii 8x8 and 8x16, embedded from
+//! `fonts/*.hex` and parsed once on first use. Drawing is in
 //! `blit::print`; this module is only the glyph data, kept in the core
-//! because the Rust-drawn error screen needs it
-//! without a guest.
+//! because the Rust-drawn error screen needs it without a guest.
+//!
+//! A codepoint neither face carries draws a hollow box.
 
-/// Pixel columns per glyph cell, including the one-column gap.
-pub const GLYPH_WIDTH: i32 = 4;
-/// Pixel rows per glyph cell, including the one-row gap.
-pub const GLYPH_HEIGHT: i32 = 6;
+use std::sync::OnceLock;
 
-const INK_WIDTH: usize = 3;
-const INK_HEIGHT: usize = 5;
-const FIRST: usize = 32;
-const LAST: usize = 126;
-const COUNT: usize = LAST - FIRST + 1;
+/// Pixel columns of an ordinary glyph in either face. A few glyphs of the
+/// large face are twice as wide; [`Glyph::width`] says so.
+pub const CELL_WIDTH: i32 = 8;
 
-/// One glyph: five rows, bit 2 is the leftmost pixel.
-pub type Glyph = [u8; INK_HEIGHT];
-
-/// Drawn for codepoints outside 32..=126.
-pub static PLACEHOLDER: Glyph = parse_glyph("###|#.#|#.#|#.#|###");
-
-/// Glyph for a codepoint, or the placeholder.
-pub fn glyph(c: char) -> &'static Glyph {
-    let code = c as usize;
-    if (FIRST..=LAST).contains(&code) {
-        &GLYPHS[code - FIRST]
-    } else {
-        &PLACEHOLDER
-    }
+/// Which system face `print` draws with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontId {
+    /// unscii-8: 8x8, the default at 320x240.
+    Small,
+    /// unscii-16: 8x16, the default at 640x480.
+    Large,
 }
 
-const fn parse_glyph(s: &str) -> Glyph {
-    let b = s.as_bytes();
-    // 5 rows of 3 cells separated by '|'.
-    assert!(b.len() == INK_HEIGHT * (INK_WIDTH + 1) - 1);
-    let mut out = [0u8; INK_HEIGHT];
-    let mut row = 0;
-    while row < INK_HEIGHT {
-        let mut col = 0;
-        while col < INK_WIDTH {
-            let ch = b[row * (INK_WIDTH + 1) + col];
-            assert!(ch == b'#' || ch == b'.');
-            if ch == b'#' {
-                out[row] |= 0b100 >> col;
-            }
-            col += 1;
+impl FontId {
+    /// The face a screen of this height starts with: the small one below
+    /// 480 rows, the large one from there, so text keeps the same 30
+    /// rows in both screen modes.
+    pub fn for_screen_height(height: u32) -> FontId {
+        if height >= 480 {
+            FontId::Large
+        } else {
+            FontId::Small
         }
-        row += 1;
     }
-    out
+
+    /// The face whose glyphs are `height` pixels tall, if there is one.
+    pub fn from_height(height: i64) -> Option<FontId> {
+        match height {
+            8 => Some(FontId::Small),
+            16 => Some(FontId::Large),
+            _ => None,
+        }
+    }
+
+    pub fn height(self) -> i32 {
+        match self {
+            FontId::Small => 8,
+            FontId::Large => 16,
+        }
+    }
+
+    /// The parsed face, shared by every console in the process.
+    pub fn font(self) -> &'static Font {
+        static SMALL: OnceLock<Font> = OnceLock::new();
+        static LARGE: OnceLock<Font> = OnceLock::new();
+        match self {
+            FontId::Small => SMALL.get_or_init(|| Font::parse(SMALL_HEX, 8)),
+            FontId::Large => LARGE.get_or_init(|| Font::parse(LARGE_HEX, 16)),
+        }
+    }
 }
 
-const fn parse_all(src: &[&str; COUNT]) -> [Glyph; COUNT] {
-    let mut out = [[0u8; INK_HEIGHT]; COUNT];
-    let mut i = 0;
-    while i < COUNT {
-        out[i] = parse_glyph(src[i]);
-        i += 1;
-    }
-    out
+const SMALL_HEX: &str = include_str!("../fonts/unscii-8.hex");
+const LARGE_HEX: &str = include_str!("../fonts/unscii-16.hex");
+
+/// One glyph: `height` rows of `width / 8` bytes each, the most
+/// significant bit leftmost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Glyph<'a> {
+    pub width: i32,
+    pub height: i32,
+    rows: &'a [u8],
 }
 
-static GLYPHS: [Glyph; COUNT] = parse_all(&GLYPH_ART);
+impl Glyph<'_> {
+    /// Whether the pixel at `(x, y)` inside the glyph is ink.
+    #[inline]
+    pub fn pixel(&self, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+            return false;
+        }
+        let stride = (self.width / 8) as usize;
+        let byte = self.rows[y as usize * stride + (x / 8) as usize];
+        byte & (0x80 >> (x % 8)) != 0
+    }
 
-#[rustfmt::skip]
-const GLYPH_ART: [&str; COUNT] = [
-    "...|...|...|...|...", // 32 space
-    ".#.|.#.|.#.|...|.#.", // 33 !
-    "#.#|#.#|...|...|...", // 34 "
-    "#.#|###|#.#|###|#.#", // 35 #
-    ".##|##.|.#.|.##|##.", // 36 $
-    "#.#|..#|.#.|#..|#.#", // 37 %
-    ".#.|#.#|.#.|#.#|.##", // 38 &
-    ".#.|.#.|...|...|...", // 39 '
-    ".#.|#..|#..|#..|.#.", // 40 (
-    ".#.|..#|..#|..#|.#.", // 41 )
-    "#.#|.#.|###|.#.|#.#", // 42 *
-    "...|.#.|###|.#.|...", // 43 +
-    "...|...|...|.#.|#..", // 44 ,
-    "...|...|###|...|...", // 45 -
-    "...|...|...|...|.#.", // 46 .
-    "..#|..#|.#.|#..|#..", // 47 /
-    "###|#.#|#.#|#.#|###", // 48 0
-    ".#.|##.|.#.|.#.|###", // 49 1
-    "###|..#|###|#..|###", // 50 2
-    "###|..#|###|..#|###", // 51 3
-    "#.#|#.#|###|..#|..#", // 52 4
-    "###|#..|###|..#|###", // 53 5
-    "###|#..|###|#.#|###", // 54 6
-    "###|..#|..#|..#|..#", // 55 7
-    "###|#.#|###|#.#|###", // 56 8
-    "###|#.#|###|..#|###", // 57 9
-    "...|.#.|...|.#.|...", // 58 :
-    "...|.#.|...|.#.|#..", // 59 ;
-    "..#|.#.|#..|.#.|..#", // 60 <
-    "...|###|...|###|...", // 61 =
-    "#..|.#.|..#|.#.|#..", // 62 >
-    "###|..#|.##|...|.#.", // 63 ?
-    ".#.|#.#|###|#..|.##", // 64 @
-    "###|#.#|###|#.#|#.#", // 65 A
-    "##.|#.#|##.|#.#|##.", // 66 B
-    "###|#..|#..|#..|###", // 67 C
-    "##.|#.#|#.#|#.#|##.", // 68 D
-    "###|#..|###|#..|###", // 69 E
-    "###|#..|###|#..|#..", // 70 F
-    "###|#..|#.#|#.#|###", // 71 G
-    "#.#|#.#|###|#.#|#.#", // 72 H
-    "###|.#.|.#.|.#.|###", // 73 I
-    "..#|..#|..#|#.#|###", // 74 J
-    "#.#|#.#|##.|#.#|#.#", // 75 K
-    "#..|#..|#..|#..|###", // 76 L
-    "#.#|###|###|#.#|#.#", // 77 M
-    "##.|#.#|#.#|#.#|#.#", // 78 N
-    "###|#.#|#.#|#.#|###", // 79 O
-    "###|#.#|###|#..|#..", // 80 P
-    "###|#.#|#.#|###|..#", // 81 Q
-    "###|#.#|##.|#.#|#.#", // 82 R
-    "###|#..|###|..#|###", // 83 S
-    "###|.#.|.#.|.#.|.#.", // 84 T
-    "#.#|#.#|#.#|#.#|###", // 85 U
-    "#.#|#.#|#.#|#.#|.#.", // 86 V
-    "#.#|#.#|###|###|#.#", // 87 W
-    "#.#|#.#|.#.|#.#|#.#", // 88 X
-    "#.#|#.#|###|.#.|.#.", // 89 Y
-    "###|..#|.#.|#..|###", // 90 Z
-    "##.|#..|#..|#..|##.", // 91 [
-    "#..|#..|.#.|..#|..#", // 92 backslash
-    ".##|..#|..#|..#|.##", // 93 ]
-    ".#.|#.#|...|...|...", // 94 ^
-    "...|...|...|...|###", // 95 _
-    "#..|.#.|...|...|...", // 96 `
-    "...|.##|#.#|#.#|.##", // 97 a
-    "#..|#..|##.|#.#|##.", // 98 b
-    "...|.##|#..|#..|.##", // 99 c
-    "..#|..#|.##|#.#|.##", // 100 d
-    "...|.#.|#.#|##.|.##", // 101 e
-    ".##|#..|##.|#..|#..", // 102 f
-    ".##|#.#|.##|..#|##.", // 103 g
-    "#..|#..|##.|#.#|#.#", // 104 h
-    ".#.|...|.#.|.#.|.#.", // 105 i
-    "..#|...|..#|..#|##.", // 106 j
-    "#..|#.#|##.|#.#|#.#", // 107 k
-    ".#.|.#.|.#.|.#.|..#", // 108 l
-    "...|#.#|###|#.#|#.#", // 109 m
-    "...|##.|#.#|#.#|#.#", // 110 n
-    "...|.#.|#.#|#.#|.#.", // 111 o
-    "##.|#.#|##.|#..|#..", // 112 p
-    ".##|#.#|.##|..#|..#", // 113 q
-    "...|.##|#..|#..|#..", // 114 r
-    "...|.##|##.|..#|##.", // 115 s
-    ".#.|###|.#.|.#.|..#", // 116 t
-    "...|#.#|#.#|#.#|.##", // 117 u
-    "...|#.#|#.#|#.#|.#.", // 118 v
-    "...|#.#|#.#|###|#.#", // 119 w
-    "...|#.#|.#.|.#.|#.#", // 120 x
-    "#.#|#.#|.##|..#|##.", // 121 y
-    "...|###|.##|#..|###", // 122 z
-    ".##|.#.|#..|.#.|.##", // 123 {
-    ".#.|.#.|.#.|.#.|.#.", // 124 |
-    "##.|.#.|..#|.#.|##.", // 125 }
-    "...|.##|##.|...|...", // 126 ~
-];
+    /// The row bytes, `height * width / 8` of them.
+    pub fn rows(&self) -> &[u8] {
+        self.rows
+    }
+}
+
+/// One face: every glyph's rows in one slab, indexed by a sorted
+/// codepoint table.
+#[derive(Debug)]
+pub struct Font {
+    height: i32,
+    /// Sorted, parallel to `entries`.
+    codes: Vec<u32>,
+    /// Offset into `bits` and the glyph's width.
+    entries: Vec<(u32, u8)>,
+    bits: Vec<u8>,
+    /// The hollow box for codepoints the face lacks.
+    placeholder: Vec<u8>,
+}
+
+impl Font {
+    /// Parse a Unifont-style hex file: `CODE:ROWS` per line, the rows a
+    /// run of hex digits, two per byte, `height` rows with as many bytes
+    /// per row as the glyph's width needs. Lines that do not fit that
+    /// shape are skipped, so a hand-edited file degrades to missing
+    /// glyphs rather than a panic; the tests check the bundled files
+    /// lose nothing.
+    pub fn parse(src: &str, height: i32) -> Font {
+        let mut glyphs: Vec<(u32, u8, Vec<u8>)> = Vec::new();
+        for line in src.lines() {
+            let Some((code, rows)) = line.trim_end().split_once(':') else {
+                continue;
+            };
+            let Ok(code) = u32::from_str_radix(code, 16) else {
+                continue;
+            };
+            if code > char::MAX as u32 || rows.len() % 2 != 0 {
+                continue;
+            }
+            let bytes = rows.len() / 2;
+            if bytes % height as usize != 0 {
+                continue;
+            }
+            let width = bytes / height as usize * 8;
+            if width != 8 && width != 16 {
+                continue;
+            }
+            let Ok(bits) = (0..bytes)
+                .map(|i| u8::from_str_radix(&rows[2 * i..2 * i + 2], 16))
+                .collect::<Result<Vec<u8>, _>>()
+            else {
+                continue;
+            };
+            glyphs.push((code, width as u8, bits));
+        }
+        glyphs.sort_by_key(|g| g.0);
+        glyphs.dedup_by_key(|g| g.0);
+        let mut codes = Vec::with_capacity(glyphs.len());
+        let mut entries = Vec::with_capacity(glyphs.len());
+        let mut bits = Vec::new();
+        for (code, width, rows) in glyphs {
+            codes.push(code);
+            entries.push((bits.len() as u32, width));
+            bits.extend_from_slice(&rows);
+        }
+        let mut placeholder = vec![0x7e; height as usize];
+        for row in placeholder.iter_mut().take(height as usize - 1).skip(1) {
+            *row = 0x42;
+        }
+        Font {
+            height,
+            codes,
+            entries,
+            bits,
+            placeholder,
+        }
+    }
+
+    /// Glyph height in pixels; the line advance.
+    pub fn height(&self) -> i32 {
+        self.height
+    }
+
+    /// Codepoints the face carries.
+    pub fn len(&self) -> usize {
+        self.codes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.codes.is_empty()
+    }
+
+    pub fn has(&self, c: char) -> bool {
+        self.codes.binary_search(&(c as u32)).is_ok()
+    }
+
+    /// The glyph for a codepoint, or the placeholder box.
+    pub fn glyph(&self, c: char) -> Glyph<'_> {
+        match self.codes.binary_search(&(c as u32)) {
+            Ok(i) => {
+                let (offset, width) = self.entries[i];
+                let len = self.height as usize * (width as usize / 8);
+                Glyph {
+                    width: width as i32,
+                    height: self.height,
+                    rows: &self.bits[offset as usize..offset as usize + len],
+                }
+            }
+            Err(_) => Glyph {
+                width: CELL_WIDTH,
+                height: self.height,
+                rows: &self.placeholder,
+            },
+        }
+    }
+
+    /// Pixels a string advances the pen by.
+    pub fn width_of(&self, text: &str) -> i32 {
+        text.chars()
+            .fold(0i32, |w, c| w.saturating_add(self.glyph(c).width))
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_is_the_familiar_shape() {
-        assert_eq!(*glyph('A'), [0b111, 0b101, 0b111, 0b101, 0b101]);
-        assert_eq!(GLYPH_WIDTH, 4);
-        assert_eq!(GLYPH_HEIGHT, 6);
+    fn ascii(g: &Glyph<'_>) -> Vec<String> {
+        (0..g.height)
+            .map(|y| {
+                (0..g.width)
+                    .map(|x| if g.pixel(x, y) { '#' } else { '.' })
+                    .collect()
+            })
+            .collect()
     }
 
     #[test]
-    fn every_printable_ascii_has_a_glyph_and_the_rest_use_the_placeholder() {
-        for code in 32u8..=126 {
-            let g = glyph(code as char);
-            assert!(
-                !std::ptr::eq(g, &PLACEHOLDER),
-                "codepoint {code} has no glyph"
-            );
-            if code != b' ' {
-                assert!(g.iter().any(|&r| r != 0), "codepoint {code} is blank");
+    fn the_bundled_files_parse_whole() {
+        let small = FontId::Small.font();
+        let large = FontId::Large.font();
+        assert_eq!(small.len(), SMALL_HEX.lines().count());
+        assert_eq!(large.len(), LARGE_HEX.lines().count());
+        assert_eq!(small.len(), 3191);
+        assert_eq!(large.len(), 3240);
+        assert_eq!(small.height(), 8);
+        assert_eq!(large.height(), 16);
+    }
+
+    #[test]
+    fn a_is_the_familiar_shape_in_both_faces() {
+        let a = FontId::Small.font().glyph('A');
+        assert_eq!(
+            ascii(&a),
+            [
+                "...##...", "..####..", ".##..##.", ".##..##.", ".######.", ".##..##.", ".##..##.",
+                "........",
+            ]
+        );
+        assert_eq!(a.rows(), [0x18, 0x3c, 0x66, 0x66, 0x7e, 0x66, 0x66, 0x00]);
+        let a = FontId::Large.font().glyph('A');
+        assert_eq!((a.width, a.height), (8, 16));
+        assert_eq!(ascii(&a)[4], ".##..##.");
+        assert!(ascii(&a)[15].chars().all(|c| c == '.'));
+    }
+
+    #[test]
+    fn every_printable_ascii_and_latin1_has_a_glyph() {
+        for id in [FontId::Small, FontId::Large] {
+            let f = id.font();
+            for code in 32u32..=255 {
+                let c = char::from_u32(code).unwrap();
+                assert!(f.has(c), "{id:?} lacks U+{code:04X}");
+                if c != ' ' && c != '\u{a0}' && c != '\u{ad}' {
+                    let g = f.glyph(c);
+                    assert!(
+                        g.rows().iter().any(|&r| r != 0),
+                        "{id:?} U+{code:04X} is blank"
+                    );
+                }
             }
+            assert!(f.has('ä') && f.has('ö') && f.has('å'));
+            assert!(f.has('█') && f.has('┌'), "box drawing");
+            assert!(f.has('\u{1fb00}'), "legacy computing block");
         }
-        assert!(std::ptr::eq(glyph(127 as char), &PLACEHOLDER));
-        assert!(std::ptr::eq(glyph('\u{e9}'), &PLACEHOLDER));
-        assert!(std::ptr::eq(glyph('\u{1f600}'), &PLACEHOLDER));
-        assert!(std::ptr::eq(glyph('\n'), &PLACEHOLDER));
     }
 
     #[test]
-    fn glyphs_stay_inside_the_ink_box() {
-        for g in GLYPHS.iter() {
-            assert!(g.iter().all(|&r| r & !0b111 == 0));
-        }
+    fn missing_codepoints_draw_the_box() {
+        let f = FontId::Small.font();
+        assert!(!f.has('\u{1f600}'));
+        let g = f.glyph('\u{1f600}');
+        assert_eq!(
+            ascii(&g),
+            [
+                ".######.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.",
+                ".######.",
+            ]
+        );
+        // Unscii gives the C0 controls their own pictures, not boxes.
+        assert!(f.has('\n'));
+        let g = FontId::Large.font().glyph('\u{1f600}');
+        assert_eq!(ascii(&g)[0], ".######.");
+        assert_eq!(ascii(&g)[8], ".#....#.");
+        assert_eq!(ascii(&g)[15], ".######.");
+    }
+
+    #[test]
+    fn the_large_face_has_double_width_glyphs_and_widths_add_up() {
+        let large = FontId::Large.font();
+        let wide = large.glyph('\u{23e9}');
+        assert_eq!((wide.width, wide.height), (16, 16));
+        assert_eq!(wide.rows().len(), 32);
+        assert!(wide.pixel(9, 8) || wide.pixel(8, 8) || wide.pixel(10, 8));
+        assert_eq!(large.width_of("A\u{23e9}"), 24);
+        assert_eq!(FontId::Small.font().width_of("hello"), 40);
+        assert_eq!(FontId::Small.font().width_of(""), 0);
+        // Out-of-range pixels are not ink.
+        assert!(!wide.pixel(-1, 0) && !wide.pixel(16, 0) && !wide.pixel(0, 16));
+    }
+
+    #[test]
+    fn parse_skips_malformed_lines() {
+        let f = Font::parse(
+            "0041:183C66667E666600\nnot a line\n0042:12\n0043:ZZ3C66667E666600\n",
+            8,
+        );
+        assert_eq!(f.len(), 1);
+        assert!(f.has('A') && !f.has('B') && !f.has('C'));
+        let empty = Font::parse("", 16);
+        assert!(empty.is_empty());
+        assert_eq!(empty.glyph('A').height, 16);
+    }
+
+    #[test]
+    fn face_defaults_follow_the_screen_mode() {
+        assert_eq!(FontId::for_screen_height(240), FontId::Small);
+        assert_eq!(FontId::for_screen_height(480), FontId::Large);
+        assert_eq!(FontId::for_screen_height(0), FontId::Small);
+        assert_eq!(FontId::from_height(8), Some(FontId::Small));
+        assert_eq!(FontId::from_height(16), Some(FontId::Large));
+        assert_eq!(FontId::from_height(12), None);
+        assert_eq!(FontId::Large.height(), 16);
     }
 }

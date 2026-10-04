@@ -444,3 +444,83 @@ fn mcp_answers_initialize_and_tools_list_over_stdio() {
     assert!(lines[1].contains(r#""name":"screenshot""#), "{}", lines[1]);
     assert!(lines[2].contains(r#""ok":true"#), "{}", lines[2]);
 }
+
+/// The handheld build has no networking at all: the options that need it
+/// say so, with the usage exit code, instead of hanging or ignoring it.
+#[cfg(not(feature = "net"))]
+#[test]
+fn a_build_without_networking_refuses_net_options() {
+    let hello = example("hello");
+    let marbles = example("marbles");
+    let scratch = Scratch::new();
+    for args in [
+        vec![
+            "run".as_ref(),
+            hello.as_os_str(),
+            "--frames".as_ref(),
+            "1".as_ref(),
+            "--net".as_ref(),
+            "host".as_ref(),
+        ],
+        vec![
+            "net_sim".as_ref(),
+            marbles.as_os_str(),
+            "--loopback".as_ref(),
+            "--out".as_ref(),
+            scratch.0.as_os_str(),
+        ],
+    ] {
+        let out = kuula().args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("no networking"), "{args:?}: {stderr}");
+    }
+}
+
+/// Deploy is networking too: the handheld build says so and exits 2 for
+/// every form of it, the shell flag included (which must not open a
+/// window or start a shell).
+#[cfg(not(feature = "net"))]
+#[test]
+fn a_build_without_networking_refuses_deploy() {
+    let hello = example("hello");
+    for args in [
+        vec!["deploy", "id"],
+        vec!["deploy", "approve", "00"],
+        vec!["deploy", "receive", "--once"],
+        vec![
+            "deploy",
+            "push",
+            hello.to_str().unwrap(),
+            "--to",
+            "endpointx",
+        ],
+        vec!["shell", "--dev-receiver"],
+        vec!["shell", "--dev-receiver", "--bind", "127.0.0.1:0"],
+        vec!["--dev-receiver"],
+    ] {
+        let out = kuula().args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("no networking"), "{args:?}: {stderr}");
+    }
+}
+
+/// The deterministic pair simulation is in memory and stays available.
+#[cfg(not(feature = "net"))]
+#[test]
+fn net_sim_still_simulates_without_networking() {
+    let scratch = Scratch::new();
+    let out = kuula()
+        .arg("net_sim")
+        .arg(example("marbles"))
+        .args(["--frames", "5", "--out"])
+        .arg(&scratch.0)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -9,6 +9,7 @@ use crate::assets;
 use crate::audio;
 use crate::blit;
 use crate::buf::{BufKind, MapInfo, Rect};
+use crate::font::FontId;
 use crate::manifest::valid_asset_name;
 use crate::meter::FrameProfile;
 use crate::palette::{Palette, Rgb};
@@ -182,6 +183,17 @@ impl DrawState {
 
     pub fn fillp(&mut self, f: Fillp) {
         self.pen.fillp = f;
+    }
+
+    /// The face `print` draws with; `None` returns to the screen mode's
+    /// default.
+    pub fn font(&mut self, id: Option<FontId>) {
+        self.pen.font = id.unwrap_or_else(|| FontId::for_screen_height(self.height));
+    }
+
+    /// Height in pixels of the face `print` draws with.
+    pub fn font_height(&self) -> i32 {
+        self.pen.font.height()
     }
 
     // ----- palette --------------------------------------------------------
@@ -729,8 +741,19 @@ mod tests {
         assert_eq!(d.rectfill(0, 0, 1, 1, Colour::solid(3)), 4);
         d.fillp(Fillp::default());
         let (end, touched) = d.print("ab", 0, 0, 7);
-        assert_eq!(end, 8);
-        assert!(touched > 0 && touched <= 30, "{touched}");
+        assert_eq!(end, 16);
+        assert!(touched > 0 && touched <= 2 * 64, "{touched}");
+        assert_eq!(
+            d.font_height(),
+            8,
+            "a small target starts on the small face"
+        );
+        d.font(Some(FontId::Large));
+        assert_eq!(d.font_height(), 16);
+        let (end, _) = d.print("ab", 0, 0, 7);
+        assert_eq!(end, 16, "the large face is 8 wide too");
+        d.font(None);
+        assert_eq!(d.font_height(), 8);
         d.clip(None);
         let sheet = d.res.alloc(BufKind::U8, 16, 8).unwrap();
         d.sheet(Some(sheet)).unwrap();

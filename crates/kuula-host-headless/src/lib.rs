@@ -6,6 +6,7 @@
 //! this process and a console in a worker process run the same loop.
 
 pub mod hash;
+pub mod net_sim;
 pub mod script;
 
 use std::path::Path;
@@ -30,7 +31,8 @@ pub struct OwnedFrame {
     pub log: Vec<String>,
     pub state: ConsoleState,
     pub profile: FrameProfile,
-    /// The frame's PCM: 44.1 kHz mono 16-bit, `SAMPLES_PER_FRAME` long.
+    /// The frame's PCM: 44.1 kHz stereo 16-bit, interleaved with the left
+    /// value first, `VALUES_PER_FRAME` long.
     pub audio: Vec<i16>,
 }
 
@@ -366,10 +368,12 @@ pub fn frame_file_name(frame: u64) -> String {
 /// The file the whole run's audio is written to beside the frames.
 pub const AUDIO_FILE: &str = "audio.wav";
 
-/// A 16-bit mono 44.1 kHz WAV: the 44-byte canonical header, then the
-/// samples little-endian.
+/// A 16-bit stereo 44.1 kHz WAV: the 44-byte canonical header, then the
+/// interleaved samples little-endian.
 pub fn wav_bytes(samples: &[i16]) -> Vec<u8> {
     let rate = kuula_core::audio::SAMPLE_RATE;
+    let channels = kuula_core::audio::OUTPUT_CHANNELS as u16;
+    let block = channels * 2;
     let data_len = (samples.len() * 2) as u32;
     let mut out = Vec::with_capacity(44 + data_len as usize);
     out.extend_from_slice(b"RIFF");
@@ -377,10 +381,10 @@ pub fn wav_bytes(samples: &[i16]) -> Vec<u8> {
     out.extend_from_slice(b"WAVEfmt ");
     out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
     out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&channels.to_le_bytes());
     out.extend_from_slice(&rate.to_le_bytes());
-    out.extend_from_slice(&(rate * 2).to_le_bytes()); // bytes per second
-    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&(rate * block as u32).to_le_bytes()); // bytes per second
+    out.extend_from_slice(&block.to_le_bytes()); // block align
     out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
@@ -593,22 +597,22 @@ mod tests {
     fn frames_carry_a_frame_of_audio_and_the_wav_header_is_right() {
         let mut c = Console::from_guest(Box::new(Stub));
         let out = Stepper::step(&mut c, FrameInput::NONE).unwrap();
-        assert_eq!(out.audio.len(), kuula_core::audio::SAMPLES_PER_FRAME);
-        let wav = wav_bytes(&[1, -2, 0x1234]);
-        assert_eq!(wav.len(), 50);
+        assert_eq!(out.audio.len(), kuula_core::audio::VALUES_PER_FRAME);
+        let wav = wav_bytes(&[1, -2, 0x1234, 7]);
+        assert_eq!(wav.len(), 52);
         assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 42);
+        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 44);
         assert_eq!(&wav[8..16], b"WAVEfmt ");
         assert_eq!(u32::from_le_bytes(wav[16..20].try_into().unwrap()), 16);
         assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 1);
-        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 2);
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 44100);
-        assert_eq!(u32::from_le_bytes(wav[28..32].try_into().unwrap()), 88200);
-        assert_eq!(u16::from_le_bytes(wav[32..34].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(wav[28..32].try_into().unwrap()), 176400);
+        assert_eq!(u16::from_le_bytes(wav[32..34].try_into().unwrap()), 4);
         assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 16);
         assert_eq!(&wav[36..40], b"data");
-        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 6);
-        assert_eq!(&wav[44..], &[1, 0, 0xfe, 0xff, 0x34, 0x12]);
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 8);
+        assert_eq!(&wav[44..], &[1, 0, 0xfe, 0xff, 0x34, 0x12, 7, 0]);
         let dir = std::env::temp_dir().join(format!("kuula-wav-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(AUDIO_FILE);

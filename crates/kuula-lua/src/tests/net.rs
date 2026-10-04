@@ -154,6 +154,34 @@ fn failed_and_permission_events_and_the_denial() {
 }
 
 #[test]
+fn an_ended_session_still_closes_the_link_when_the_cart_goes() {
+    // A join nobody answers ends the session without a `Leave`, so the
+    // link keeps the transport it built. When the cart is torn down the
+    // console must still say bye for it, or the next cart would greet
+    // its peer through a transport built for this one.
+    let src = logger(&format!(
+        "if stat('frame') == 2 then net.join('{MEMORY_TICKET}') end
+  if stat('frame') == 4 then error('bang') end"
+    ));
+    let (a, _b) = MemoryTransport::pair();
+    let mut c = net_console(&src, true);
+    let mut link = Link::over(Box::new(a));
+    let mut all = Vec::new();
+    for _ in 0..3 {
+        c.step_linked(&mut link, FrameInput::NONE);
+        all.extend(logs(&c));
+    }
+    assert_eq!(all, ["3:failed:net_connect"]);
+    assert_eq!(c.net_state().unwrap().status.as_str(), "ended");
+    assert!(link.is_live(), "the refused join left the transport built");
+    c.step_linked(&mut link, FrameInput::NONE);
+    assert!(c.state().fault().is_some());
+    // The teardown `Leave` goes out on the host's next drain.
+    c.step_linked(&mut link, FrameInput::NONE);
+    assert!(!link.is_live(), "the torn-down cart's transport is closed");
+}
+
+#[test]
 fn bounds_are_lua_errors_or_false_and_recv_runs_dry() {
     let src = logger(
         "if stat('frame') == 2 then net.host() end

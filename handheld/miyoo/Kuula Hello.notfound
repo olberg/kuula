@@ -1,0 +1,18 @@
+#!/bin/sh
+# Standalone Ports Script Template
+
+# main configuration :
+GameName="Kuula Hello"
+GameDir="Kuula"
+GameExecutable="launch.sh"
+GameDataFile="launch.sh"
+
+# additional configuration
+KillAudioserver=1
+PerformanceMode=1
+
+# specific to this port : the first-run cart, without the shell
+Arguments="carts/hello"
+
+# running command line :
+/mnt/SDCARD/Emu/PORTS/launch_standalone.sh "$GameName" "$GameDir" "$GameExecutable" "$Arguments" "$GameDataFile" "$KillAudioserver" "$PerformanceMode"

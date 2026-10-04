@@ -5,6 +5,7 @@ use crate::api::reg::Reg;
 use crate::api::{Group, Price, Scope, Sig};
 use crate::meter::charge;
 use kuula_core::buf::{to_int, Rect};
+use kuula_core::font::FontId;
 use kuula_core::meter::price;
 use kuula_core::{Category, Fillp};
 use mlua::{Error, Result, Value, Variadic};
@@ -148,6 +149,17 @@ pub(super) fn install(reg: &mut Reg<'_>) -> Result<()> {
             api(lua, |ctx| ctx.state.fillp(f))
         },
     )?;
+
+    reg.function(&FONT, |lua, h: Option<i64>| {
+        let id = match h {
+            None => None,
+            Some(h) => match FontId::from_height(h) {
+                Some(id) => Some(id),
+                None => return Err(Error::runtime("font takes 8, 16 or nothing")),
+            },
+        };
+        api(lua, |ctx| ctx.state.font(id))
+    })?;
     Ok(())
 }
 
@@ -249,9 +261,28 @@ binding!(PRINT {
     ],
     price: Price::Text,
     defaults: &[("c", "7")],
-    doc: "The drawing form needs numeric `x` and `y`. The system font is \
-          4x6 pixels per glyph; text ignores `fillp`. Any other call shape, \
-          such as `print(\"x =\", x)`, is the logging form.",
+    doc: "The drawing form needs numeric `x` and `y`. Text is drawn with \
+          the system face `font` selected, 8x8 or 8x16 pixels per glyph, \
+          and ignores `fillp`. Text is UTF-8: Latin, Greek, Cyrillic, box \
+          drawing and block graphics draw; anything the face lacks draws a \
+          hollow box. Any other call shape, such as `print(\"x =\", x)`, is \
+          the logging form.",
+});
+
+binding!(FONT {
+    name: "font",
+    scope: Scope::Global,
+    group: Group::Drawing,
+    sigs: &[Sig::new(
+        "font([h])",
+        "nothing; `font()` returns to the default"
+    )],
+    price: Price::One,
+    doc: "Selects the system face `print` draws with by its glyph height: \
+          8 for unscii-8 (8x8) or 16 for unscii-16 (8x16). The default is \
+          8 at 320x240 and 16 at 640x480, so a screen holds 30 rows of \
+          text either way; `stat(\"font\")` reads the height in use. Any \
+          other value is a Lua error.",
 });
 
 binding!(CLIP {

@@ -166,7 +166,7 @@ fn validate_refuses_missing_metadata_and_internal_text() {
         .validate()
         .unwrap_err()
         .contains("empty signature"));
-    // Spelled apart so the public export keeps these lines.
+    // Spelled apart so these are not marked lines themselves.
     let internal = Binding {
         doc: concat!("public text [inter", "nal] a note"),
         ..ok

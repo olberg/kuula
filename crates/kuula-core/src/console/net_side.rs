@@ -22,6 +22,11 @@ impl Console {
             // that does so is confused, and the events go nowhere.
             return;
         }
+        if let Some(view) = self.network_view_mut() {
+            for event in &events {
+                view.observe(event);
+            }
+        }
         self.cart.net_pending.extend(events);
     }
 
@@ -39,7 +44,7 @@ impl Console {
 
     /// The commands the cart issued in the last step, or a single
     /// `Leave` when the cart was torn down (fault, quit, restart or a
-    /// new cart) with a session live. Drained. The torn-down cart's
+    /// new cart) after it hosted or joined. Drained. The torn-down cart's
     /// own commands go with it: a faulted cart does not step again, so
     /// what its last frame queued would otherwise be drained on the
     /// next host tick and build a transport for a stopped cart.

@@ -247,8 +247,11 @@ end
     let mut c = console(src);
     run(&mut c, 2);
     assert_eq!(c.state().fault(), None, "{:?}", c.state());
-    assert_eq!(c.output().log, ["hello\t1", "42", "4"]);
-    assert_eq!(pixel(&c, 0, 0), 7);
+    assert_eq!(c.output().log, ["hello\t1", "42", "8"]);
+    // No manifest means 640x480 and the 8x16 face, whose A starts on
+    // its third row.
+    assert_eq!(pixel(&c, 3, 2), 7);
+    assert_eq!(pixel(&c, 0, 0), 0);
 }
 
 #[test]
@@ -271,7 +274,7 @@ end
     assert_eq!(log[3], "hp	3");
     assert_eq!(log.len(), 4, "print('n', 1, 2) draws, so it is not logged");
     let c = &c;
-    let mut cell = (1..5).flat_map(|x| (2..8).map(move |y| pixel(c, x, y)));
+    let mut cell = (1..9).flat_map(|x| (2..18).map(move |y| pixel(c, x, y)));
     assert!(cell.any(|p| p == 7), "glyph drawn at (1, 2)");
 }
 

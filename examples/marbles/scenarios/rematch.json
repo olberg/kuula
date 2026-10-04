@@ -1,0 +1,179 @@
+{
+  "config": {
+    "frames": 450,
+    "state": [
+      "game"
+    ]
+  },
+  "host_input": [
+    {
+      "frames": 9
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 1
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 47
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 59
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 59
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 40
+    },
+    {
+      "frames": 10
+    },
+    {
+      "frames": 39
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 1
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 27
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 59
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 59
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 30
+    }
+  ],
+  "join_input": [
+    {
+      "frames": 9
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 1
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 77
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 59
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 70
+    },
+    {
+      "frames": 9
+    },
+    {
+      "buttons": [
+        "b"
+      ]
+    },
+    {
+      "frames": 39
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 1
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 57
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 59
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 60
+    }
+  ]
+}

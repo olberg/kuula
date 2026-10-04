@@ -80,7 +80,8 @@ end
     assert_eq!(pixel(&c, 5, 3), 5);
     assert_eq!(pixel(&c, 17, 20), 6);
     assert_eq!(pixel(&c, 30, 20), 7);
-    assert_eq!(pixel(&c, 40, 0), 8);
+    assert_eq!(pixel(&c, 43, 0), 8, "the top of the A");
+    assert_eq!(pixel(&c, 40, 0), 1, "its first column is blank");
     assert_eq!(c.output().width, 320);
 }
 
@@ -547,6 +548,50 @@ fn a_cart_without_a_manifest_runs_at_640x480() {
     assert_eq!(out.screen.len(), 640 * 480);
 }
 
+/// The face follows the screen mode until a cart picks one, and either
+/// face works in either mode.
+#[test]
+fn font_defaults_per_mode_and_either_face_is_selectable() {
+    let src = "function _init()
+  print(stat('font'))
+  font(16)
+  print(stat('font'))
+  local x = print('ab', 0, 0, 7)
+  print(x)
+  font(8)
+  print(stat('font'))
+  font()
+  print(stat('font'))
+  print(pcall(font, 12))
+  print(stat('font'))
+  print(print('\\u{e4}\\u{2588}', 0, 100, 7))
+end
+";
+    let mut c = gfx_console(src);
+    run(&mut c, 1);
+    ok(&c);
+    let log = c.output().log.to_vec();
+    assert_eq!(log[0], "8", "320x240 starts on the 8x8 face");
+    assert_eq!(log[1], "16");
+    assert_eq!(log[2], "16", "the 8x16 face is 8 wide too");
+    assert_eq!(log[3], "8");
+    assert_eq!(log[4], "8", "font() returns to the mode's default");
+    assert!(log[5].starts_with("false\t") && log[5].contains("font takes 8, 16 or nothing"));
+    assert_eq!(log[6], "8", "a refused value leaves the face alone");
+    assert_eq!(log[7], "16", "two UTF-8 glyphs advance 16");
+    // The full block is solid ink across its cell.
+    assert!((8..16).all(|x| (100..108).all(|y| pixel(&c, x, y) == 7)));
+
+    let mut c = console("function _init() print(stat('font')) font(8) print(stat('font')) end");
+    run(&mut c, 1);
+    ok(&c);
+    assert_eq!(
+        c.output().log,
+        ["16", "8"],
+        "640x480 starts on the 8x16 face"
+    );
+}
+
 #[test]
 fn preloaded_assets_are_the_same_buffers_load_returns() {
     let png = sheet_png();
@@ -595,7 +640,7 @@ function _init()
   local t = {8, 7, 6, 5, 4, 3, 2, 1}
   local sort_cost = delta(function() table.sort(t) end)
   local ink = 0
-  for y = 0, 5 do for x = 0, 7 do if pget(x, y) == 7 then ink = ink + 1 end end end
+  for y = 0, 7 do for x = 0, 15 do if pget(x, y) == 7 then ink = ink + 1 end end end
   log(sheet_first, sheet_again, map_cost, text_cost, ink, fill_cost, copy_cost, log_cost, sort_cost, buf_cost)
 end
 ";

@@ -1,0 +1,117 @@
+name: Release
+
+# Pushing a tag `v<version>` builds the release binaries for Windows and
+# Linux and publishes them as a GitHub release, with the README's
+# changelog section for that version as its notes.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.98.1"
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x86_64
+          - os: ubuntu-24.04
+            name: linux-x86_64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: The tag is the workspace's version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME, but Cargo.toml says $version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install SDL2 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsdl2-dev pkg-config
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Build
+        run: cargo build --release --locked -p kuula-cli
+
+      # The binary beside what it needs to be tried: the example carts
+      # (the shell lists `examples/`), the game and the documentation.
+      - name: Package
+        run: |
+          dir="kuula-$VERSION-${{ matrix.name }}"
+          mkdir "$dir"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/kuula.exe "$dir/"
+          else
+            cp target/release/kuula "$dir/"
+          fi
+          cp -r LICENSE README.md docs examples alien-invaders "$dir/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip "$dir.zip" "$dir"
+          else
+            tar czf "$dir.tar.gz" "$dir"
+          fi
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            kuula-*.zip
+            kuula-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      # The notes are the README's changelog section for this version.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="### $version" '
+            $0 == v { on = 1; next }
+            on && /^##/ { exit }
+            on { print }
+          ' README.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "README.md has no changelog section for $version" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Kuula $version" \
+            --notes-file notes.md

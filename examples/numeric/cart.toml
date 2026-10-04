@@ -1,3 +1,4 @@
 [cart]
+license = "MIT"
 title = "Numeric probe"
 screen_mode = "320x240"

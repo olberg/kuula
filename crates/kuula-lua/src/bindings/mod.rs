@@ -147,8 +147,8 @@ pub(crate) fn install(reg: &mut Reg<'_>, graveyard: Graveyard) -> Result<()> {
         })
     })?;
 
-    // `stat(name)`: the meter and the caps, as numbers (architecture
-    // 7.1: the profiler is exposed to the cart).
+    // `stat(name)`: the meter and the caps, as numbers. The profiler is
+    // exposed to the cart.
     reg.function(&STAT, |lua, name: String| {
         charge(lua, Category::Api, 1)?;
         let int = |v: u64| Value::Integer(v.min(i64::MAX as u64) as i64);
@@ -165,6 +165,7 @@ pub(crate) fn install(reg: &mut Reg<'_>, graveyard: Graveyard) -> Result<()> {
             "frame" => int(with_ctx(lua, |ctx| ctx.frame)?),
             "width" => int(with_ctx(lua, |ctx| ctx.state.width() as u64)?),
             "height" => int(with_ctx(lua, |ctx| ctx.state.height() as u64)?),
+            "font" => int(with_ctx(lua, |ctx| ctx.state.font_height() as u64)?),
             "net_sent" | "net_received" | "net_dropped" | "net_inbox" => {
                 let v = with_ctx(lua, |ctx| {
                     ctx.state.net.as_ref().map(|n| match name.as_str() {
@@ -229,7 +230,8 @@ binding!(STAT {
           `\"cpu_budget\"`, `\"mem\"` (Lua heap bytes), `\"mem_limit\"` \
           (16 MiB), `\"gfx_mem\"`, `\"gfx_limit\"` (8 MiB), `\"frame\"` \
           (the frame being run, 1-based), `\"width\"` and `\"height\"` \
-          (the screen size the manifest chose). With the `net` service: \
+          (the screen size the manifest chose), `\"font\"` (the glyph height \
+          `print` draws with, 8 or 16). With the `net` service: \
           `\"net_sent\"`, `\"net_received\"`, `\"net_dropped\"` and \
           `\"net_inbox\"` (the counters and the unread events). Any other \
           name is a Lua error.",

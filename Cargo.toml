@@ -10,9 +10,13 @@ members = [
     "crates/kuula-net",
     "crates/kuula-apidoc",
 ]
+# The Open Module Track engine is a copy of another repository's crate:
+# a dependency, not a member, so the workspace's fmt, clippy and tests
+# leave it as upstream wrote it.
+exclude = ["crates/vendor/omt-engine"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Olli Sikstus"]
@@ -23,6 +27,7 @@ kuula-lua = { path = "crates/kuula-lua" }
 kuula-host-sdl = { path = "crates/kuula-host-sdl" }
 kuula-host-headless = { path = "crates/kuula-host-headless" }
 kuula-mcp = { path = "crates/kuula-mcp" }
+omt-engine = { path = "crates/vendor/omt-engine" }
 mlua = { version = "0.12", features = ["lua55", "vendored"] }
 # The features are chosen per target in crates/kuula-host-sdl/Cargo.toml:
 # the bundled static SDL 2.26 on Windows, the system SDL2 elsewhere.
@@ -39,6 +44,14 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate
 # A copy of mlua-sys 0.12.0 with one change: `luaL_makeseed` always takes
 # the C path, so the string-hash seed pinned in `.cargo/config.toml` holds
 # on Linux and macOS too (the stock crate seeds those from the OS RNG).
-# See crates/vendor/mlua-sys/src/lua55/lauxlib.rs and docs/docker.md.
+# See crates/vendor/mlua-sys/src/lua55/lauxlib.rs.
 [patch.crates-io]
 mlua-sys = { path = "crates/vendor/mlua-sys" }
+
+# Dev and test builds carry debug information for this workspace's own
+# crates only. With it for every dependency as well, each test binary
+# that links the networking stack came with 200 MB and more of it, and
+# writing those files was most of the time a test run took to build.
+# Release builds are unchanged.
+[profile.dev.package."*"]
+debug = false

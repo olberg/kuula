@@ -88,16 +88,28 @@ impl IrohTransport {
     /// A transport whose endpoint, when one is built, binds every
     /// interface (`None`) or one address (tests use loopback).
     pub fn new(bind: Option<SocketAddr>) -> IrohTransport {
+        Self::configured(
+            NetConfig {
+                enabled: true,
+                bind,
+                ..Default::default()
+            },
+            Default::default(),
+        )
+    }
+
+    pub fn configured(
+        mut config: NetConfig,
+        diagnostics: Arc<std::sync::Mutex<String>>,
+    ) -> IrohTransport {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (ev_tx, ev_rx) = mpsc::sync_channel(BACKLOG);
         let report = ev_tx.clone();
         let cancel = Arc::new(AtomicBool::new(false));
+        config.cancel = Some(cancel.clone());
         let driver = Driver {
-            config: NetConfig {
-                enabled: true,
-                bind,
-                cancel: Some(cancel.clone()),
-            },
+            config,
+            diagnostics,
             cmds: cmd_rx,
             events: ev_tx,
             net: None,
@@ -160,6 +172,7 @@ impl Drop for IrohTransport {
 }
 
 struct Driver {
+    diagnostics: Arc<std::sync::Mutex<String>>,
     config: NetConfig,
     cmds: Receiver<Command>,
     events: SyncSender<Event>,
@@ -324,6 +337,8 @@ impl Driver {
     /// Advance whatever is in progress; `false` when the transport is
     /// gone.
     fn pump(&mut self) -> bool {
+        *self.diagnostics.lock().unwrap() =
+            self.session.as_ref().map(|s| s.path()).unwrap_or_default();
         if !self.stalled.is_empty() {
             return true;
         }

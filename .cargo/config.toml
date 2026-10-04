@@ -24,3 +24,14 @@ CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 CFLAGS = "-Dluai_makeseed=0u*sizeof!luaL_newstate -DLUA_USER_H=\"kuula_user.h\""
 INCLUDE = { value = "crates/kuula-lua/c", relative = true }
 CPATH = { value = "crates/kuula-lua/c", relative = true }
+
+# The Miyoo Mini (Plus) build, `handheld/miyoo/Dockerfile`: a Cortex-A7 with
+# VFPv4 and NEON, glibc 2.28. cc reads CFLAGS_<target> instead of CFLAGS
+# when it is set, so this line repeats the seed pin and the numeric-profile
+# header above. `-ffp-contract=off` keeps Lua's `a*b+c` from becoming one
+# fused multiply-add, which x86-64 does not do; `-mfpu=vfpv4` without NEON
+# keeps GCC from vectorising float code, whose flush-to-zero is not IEEE.
+CFLAGS_armv7_unknown_linux_gnueabihf = "-Dluai_makeseed=0u*sizeof!luaL_newstate -DLUA_USER_H=\"kuula_user.h\" -march=armv7-a -mfpu=vfpv4 -mfloat-abi=hard -mtune=cortex-a7 -ffp-contract=off"
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"

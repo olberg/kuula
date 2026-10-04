@@ -10,18 +10,23 @@
 //! queued here during its step and applied by the console afterwards, so
 //! a request never tears down the guest that is making it.
 
+pub mod network;
+
 use std::rc::Rc;
 
 use crate::fault::Fault;
 use crate::source::CartSource;
 
 /// A cart the shell can list and run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CartEntry {
     /// Stable name the shell passes back to `sys.run`.
     pub name: String,
     /// Display title from the manifest, or the name.
     pub title: String,
+    pub network: bool,
+    pub author: String,
+    pub license: Option<crate::manifest::License>,
 }
 
 /// Host-side settings the shell edits. Applying them is the host's job
@@ -50,6 +55,11 @@ impl Default for Settings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SysRequest {
     Run(String),
+    RunNetwork {
+        name: String,
+        invite: Option<String>,
+    },
+    Network(network::Action),
     Quit,
     Restart,
     SetScale(u32),
@@ -76,7 +86,11 @@ pub struct SysState {
     pub paused: bool,
     /// Menu went down this frame.
     pub menu_pressed: bool,
+    /// The host loaded a cart itself (`Console::host_load_cart`) and the
+    /// shell has not asked since: `sys.host_started()` reads and clears it.
+    pub host_started: bool,
     pub requests: Vec<SysRequest>,
+    pub network: network::View,
 }
 
 impl SysState {
@@ -88,7 +102,9 @@ impl SysState {
             running: false,
             paused: false,
             menu_pressed: false,
+            host_started: false,
             requests: Vec::new(),
+            network: network::View::default(),
         }
     }
 

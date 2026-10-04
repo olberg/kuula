@@ -16,6 +16,7 @@ use crate::{Code, Event, Net, NetConfig, NetError, Session};
 pub(crate) fn loopback() -> NetConfig {
     NetConfig {
         enabled: true,
+        relay: Default::default(),
         bind: Some("127.0.0.1:0".parse().unwrap()),
         cancel: None,
     }
@@ -268,8 +269,8 @@ fn a_cancelled_ping_still_closes_cleanly() {
     assert_eq!(code, u64::from(proto::close::BYE));
 }
 
-/// A ping whose pong never comes ends the session with code 3, as
-/// `docs/net.md` says, rather than only failing the call.
+/// A ping whose pong never comes ends the session with code 3, as the
+/// protocol says, rather than only failing the call.
 #[test]
 fn a_missing_pong_ends_the_session_with_code_3() {
     let (_a, mut s, raw, conn, _send, _recv) = raw_session();

@@ -1,13 +1,15 @@
 //! PCM samples: a bounded WAV decoder (8 or 16-bit mono PCM only), the
-//! per-cart bank with its 2 MB budget, and a voice that plays a sample
-//! at a 16.16 fixed-point step with nearest-sample resampling.
+//! per-cart bank with its 2 MiB budget (shared with the sample records of
+//! the songs a cart loads), and a voice that plays a sample at a 16.16
+//! fixed-point step with nearest-sample resampling.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::{AudioError, SAMPLE_RATE};
 
-/// Bytes of sample data (as stored in the files) a cart may hold.
+/// Bytes of sample data a cart may hold: the PCM data bytes of its WAV
+/// files and 2 bytes per sample frame of its songs' sample records.
 pub const SAMPLE_BUDGET: usize = 2 * 1024 * 1024;
 
 /// Sample rates outside this range are refused.
@@ -118,7 +120,8 @@ pub fn decode_wav(path: &str, bytes: &[u8]) -> Result<Sample, AudioError> {
     })
 }
 
-/// The cart's decoded samples by path, within [`SAMPLE_BUDGET`].
+/// The cart's decoded samples by path, within [`SAMPLE_BUDGET`], which
+/// also counts what its songs hold.
 #[derive(Default)]
 pub struct SampleBank {
     samples: HashMap<String, Rc<Sample>>,
@@ -132,6 +135,17 @@ impl SampleBank {
 
     pub fn used(&self) -> usize {
         self.used
+    }
+
+    /// Bytes of the budget still free.
+    pub fn room(&self) -> usize {
+        SAMPLE_BUDGET - self.used
+    }
+
+    /// Count the sample data of a loaded song against the budget; the
+    /// loader has checked it fits [`SampleBank::room`].
+    pub fn charge(&mut self, bytes: usize) {
+        self.used += bytes;
     }
 
     /// Decode and keep a sample, or fail if the budget would overflow.

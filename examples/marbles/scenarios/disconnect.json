@@ -1,0 +1,92 @@
+{
+  "config": {
+    "frames": 220,
+    "state": [
+      "game"
+    ],
+    "delay": 3,
+    "disconnect": 100
+  },
+  "host_input": [
+    {
+      "frames": 9
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 1
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 47
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 59
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 59
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 40
+    }
+  ],
+  "join_input": [
+    {
+      "frames": 9
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 1
+    },
+    {
+      "buttons": [
+        "right"
+      ]
+    },
+    {
+      "frames": 77
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 59
+    },
+    {
+      "buttons": [
+        "a"
+      ]
+    },
+    {
+      "frames": 70
+    }
+  ]
+}

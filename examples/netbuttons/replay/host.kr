@@ -1,5 +1,5 @@
 kuula-transcript 2
-{ cart = "0x47b1d6da0b20dc41", frames = 90, invite = "", net = true, runtime = "0.0.2", seed = 0, services = { [1] = "net" }, version = 2 }
+{ cart = "0x37406594bb0461e1", frames = 90, invite = "", net = true, runtime = "0.0.3", seed = 0, services = { [1] = "net" }, version = 2 }
 { buttons = 0, frames = 2 }
 { at = 2, events = {}, io = { [1] = { op = "host" } } }
 { buttons = 0, frames = 1 }

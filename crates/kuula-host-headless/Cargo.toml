@@ -11,4 +11,5 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+kuula-lua.workspace = true
 png.workspace = true

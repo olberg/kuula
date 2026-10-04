@@ -3,6 +3,7 @@
 //! (section 9.2) and fill pattern.
 
 use crate::buf::Rect;
+use crate::font::FontId;
 use crate::palette::PALETTE_SIZE;
 use crate::resources::BufId;
 
@@ -161,6 +162,8 @@ pub struct Pen {
     pub fillp: Fillp,
     pub table: ColourTable,
     pub sheet: Option<BufId>,
+    /// The face `print` draws with; starts on the screen mode's default.
+    pub font: FontId,
 }
 
 impl Pen {
@@ -172,6 +175,7 @@ impl Pen {
             fillp: Fillp::default(),
             table: ColourTable::default(),
             sheet: None,
+            font: FontId::for_screen_height(height),
         }
     }
 

@@ -50,6 +50,7 @@ pub(crate) enum Cmd {
 
 /// A session after the handshake, before the caller wraps it.
 pub(crate) struct Parts {
+    connection: iroh::endpoint::WeakConnectionHandle,
     peer_id: String,
     peer_runtime: String,
     cmd: mpsc::Sender<Cmd>,
@@ -60,6 +61,7 @@ pub(crate) struct Parts {
 
 /// One open session. Every call is blocking with a bound.
 pub struct Session {
+    connection: iroh::endpoint::WeakConnectionHandle,
     inner: Arc<Inner>,
     peer_id: String,
     peer_runtime: String,
@@ -84,6 +86,7 @@ impl Session {
             .sessions
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Session {
+            connection: parts.connection,
             inner,
             peer_id: parts.peer_id,
             peer_runtime: parts.peer_runtime,
@@ -143,6 +146,19 @@ impl Session {
             Err(mpsc::error::TryRecvError::Disconnected) => {
                 Err(NetError::new(Code::Connect, "the session has ended"))
             }
+        }
+    }
+
+    /// The actual selected transport path, strictly host-side.
+    pub fn path(&self) -> String {
+        let Some(conn) = self.connection.upgrade() else {
+            return String::new();
+        };
+        let paths = conn.paths();
+        match paths.iter().find(|p| p.is_selected()) {
+            Some(p) if p.is_ip() => format!("direct {}", p.remote_addr()),
+            Some(p) if p.is_relay() => format!("relay {}", p.remote_addr()),
+            _ => "negotiating path".into(),
         }
     }
 
@@ -264,8 +280,10 @@ pub(crate) async fn establish(conn: Connection, side: Side) -> Result<Parts, Net
     let (cmd_tx, cmd_rx) = mpsc::channel(proto::OUTGOING_QUEUE);
     let (event_tx, event_rx) = mpsc::channel(proto::EVENT_QUEUE);
     let (abort_tx, abort_rx) = oneshot::channel();
+    let connection = conn.weak_handle();
     let task = tokio::spawn(run(conn, send, recv, cmd_rx, event_tx, abort_rx));
     Ok(Parts {
+        connection,
         peer_id,
         peer_runtime,
         cmd: cmd_tx,
@@ -332,7 +350,7 @@ async fn run(
     let mut stalled: Option<Event> = None;
 
     // Biased: the abort first, then the peer's frames, so a `Ping` is
-    // answered ahead of the queued outgoing texts as `docs/net.md`
+    // answered ahead of the queued outgoing texts, as the protocol
     // promises; the outgoing queue is served when the peer is quiet.
     let end = loop {
         tokio::select! {
@@ -403,6 +421,11 @@ async fn run(
             },
         }
     };
+    // The session has ended: no command is taken from here on. Closing the
+    // queue before the end is reported means a caller that has seen the
+    // end event finds every later call refused, not queued for a task
+    // that is about to go.
+    cmds.close();
     let event = match end {
         Outcome::Close(code, event) => {
             conn.close(code.into(), close::reason(code));

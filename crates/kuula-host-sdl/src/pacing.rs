@@ -3,6 +3,9 @@
 //! accumulate. Only if the loop falls more than [`Scheduler::RESYNC_AFTER`]
 //! behind (the window was being dragged, the machine slept) does the
 //! schedule restart from now instead of running a burst of catch-up
+//! frames. Short of that, a loop that is a whole period late steps the
+//! console again before it presents ([`Scheduler::steps_due`]): frames are
+//! time, and a display slower than the frame rate drops pictures, not
 //! frames.
 
 use std::time::{Duration, Instant};
@@ -66,6 +69,9 @@ impl Scheduler {
     /// How far behind the schedule may fall before it restarts from now.
     pub const RESYNC_AFTER: Duration = Duration::from_millis(500);
 
+    /// Most frames stepped for one shown.
+    pub const MAX_STEPS: u32 = 4;
+
     pub fn new(now: Duration, period: Duration) -> Scheduler {
         Scheduler {
             period,
@@ -76,6 +82,20 @@ impl Scheduler {
     /// The deadline the next `wait` will target.
     pub fn next_deadline(&self) -> Duration {
         self.next
+    }
+
+    /// How many frames to step before the next one is shown: one, and one
+    /// more for each whole period the schedule is already behind, at most
+    /// [`Scheduler::MAX_STEPS`]. The extra ones are taken off the schedule,
+    /// so a display that presents slower than the frame rate, or a slow
+    /// frame, costs shown frames and not time.
+    pub fn steps_due(&mut self, now: Duration) -> u32 {
+        let mut steps = 1;
+        while steps < Self::MAX_STEPS && now >= self.next {
+            self.next += self.period;
+            steps += 1;
+        }
+        steps
     }
 
     /// Block until the next deadline and advance the schedule. Returns the
@@ -157,6 +177,49 @@ mod tests {
         let third = s.wait(&mut clock);
         assert_eq!(third, t0 + 3 * PERIOD);
         assert_eq!(s.next_deadline(), t0 + 4 * PERIOD);
+    }
+
+    /// A display that presents every 17.5 ms against a 16.67 ms frame: the
+    /// loop cannot keep the schedule by presenting, so now and then it
+    /// steps twice, and a second still has sixty frames.
+    #[test]
+    fn a_slow_display_costs_shown_frames_not_time() {
+        let mut clock = FakeClock::new();
+        let t0 = clock.now();
+        let mut s = Scheduler::new(t0, PERIOD);
+        let (mut stepped, mut shown) = (0u32, 0u32);
+        while clock.now() < t0 + Duration::from_secs(10) {
+            stepped += s.steps_due(clock.now());
+            // Step, draw, and a present that blocks.
+            clock.now += Duration::from_micros(17_500);
+            shown += 1;
+            s.wait(&mut clock);
+        }
+        assert!(
+            (598..=602).contains(&stepped),
+            "{stepped} frames in ten seconds"
+        );
+        assert!((569..=573).contains(&shown), "{shown} shown");
+    }
+
+    #[test]
+    fn a_loop_on_time_steps_once_and_a_late_one_at_most_four_times() {
+        let mut clock = FakeClock::new();
+        let mut s = Scheduler::new(clock.now(), PERIOD);
+        assert_eq!(s.steps_due(clock.now()), 1);
+        s.wait(&mut clock);
+        assert_eq!(s.steps_due(clock.now()), 1, "woken at the deadline");
+        // 150 ms late, nine periods: four at once, twice, without sleeping,
+        // and then the schedule is back.
+        clock.now += Duration::from_millis(150);
+        assert_eq!(s.steps_due(clock.now()), Scheduler::MAX_STEPS);
+        s.wait(&mut clock);
+        assert_eq!(s.steps_due(clock.now()), Scheduler::MAX_STEPS);
+        s.wait(&mut clock);
+        assert_eq!(clock.sleeps.len(), 1, "no sleep while behind");
+        assert!(s.steps_due(clock.now()) <= 2);
+        s.wait(&mut clock);
+        assert_eq!(clock.sleeps.len(), 2, "caught up: it sleeps again");
     }
 
     #[test]

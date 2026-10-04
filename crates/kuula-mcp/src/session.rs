@@ -20,6 +20,40 @@ use kuula_core::{
 /// Builds a transport for a console that hosts or joins; injected by
 /// the binary, since this crate opens no socket.
 pub type TransportFactory = Rc<dyn Fn() -> Box<dyn Transport>>;
+
+/// What the `deploy` tool asks of the binary: push this cart, as
+/// `name`, to the receiver `to` names.
+pub struct DeployRequest {
+    /// The cart directory's name, which becomes `<name>.cart` there.
+    pub name: String,
+    /// The cart as the other tools read it, bounded by the usual limits.
+    pub snapshot: Snapshot,
+    /// The receiver's ticket.
+    pub to: String,
+}
+
+/// What a receiver reported; every field but `name`, `bytes` and
+/// `digest` is the receiver's word and untrusted text.
+pub struct DeployOutcome {
+    pub name: String,
+    pub bytes: u64,
+    /// SHA-256 of the package, lower-case hex.
+    pub digest: String,
+    /// `deploy_ok`, or the code the receiver refused with.
+    pub code: String,
+    pub detail: String,
+    /// `ok`, `failed` or `skipped`, for each stage.
+    pub transfer: String,
+    pub validation: String,
+    pub install: String,
+    /// `started`, `faulted`, `not_run` or `timeout`.
+    pub restart: String,
+}
+
+/// Pushes a cart to a receiver; injected by the binary like the
+/// transport, since this crate opens no socket. A failure is a
+/// [`ToolError`] carrying the `net_*` or `deploy_*` code.
+pub type DeployFn = Rc<dyn Fn(DeployRequest) -> Result<DeployOutcome, ToolError>>;
 use kuula_host_headless::OwnedFrame;
 use kuula_lua::LuaGuest;
 
@@ -263,6 +297,7 @@ pub struct Session {
     consoles: HashMap<String, Live>,
     next_handle: u64,
     transports: Option<TransportFactory>,
+    deploy: Option<DeployFn>,
 }
 
 impl Session {
@@ -276,14 +311,33 @@ impl Session {
             consoles: HashMap::new(),
             next_handle: 1,
             transports,
+            deploy: None,
         }
+    }
+
+    /// Give the session a way to push carts; without one `deploy` is
+    /// refused as unavailable.
+    pub fn with_deploy(mut self, deploy: Option<DeployFn>) -> Session {
+        self.deploy = deploy;
+        self
+    }
+
+    /// The injected push, if the server was started with one.
+    pub fn deploy_fn(&self) -> Option<DeployFn> {
+        self.deploy.clone()
     }
 
     /// A permitted link over a fresh transport, or `None` when the
     /// server was started without networking.
-    pub fn link(&self) -> Option<Link> {
+    pub fn link(&self, snap: &Snapshot) -> Option<Link> {
         let make = self.transports.clone()?;
-        let mut link = Link::new(Box::new(move || make()));
+        let identity = kuula_core::net::identity::Identity::new(snap);
+        let mut link = Link::new(Box::new(move || {
+            Box::new(kuula_core::net::identity::VerifiedTransport::new(
+                make(),
+                identity.clone(),
+            ))
+        }));
         link.set_permitted(true);
         Some(link)
     }

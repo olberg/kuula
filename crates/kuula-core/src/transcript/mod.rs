@@ -6,8 +6,8 @@
 //! Nothing else reaches a cart today: it has no clock, its loads come
 //! from the immutable snapshot, and its saves go to a store whose results
 //! do not depend on the host ([`crate::save::WriteThroughStore`]). The
-//! per-frame messages, connection changes and I/O outcomes the
-//! architecture reserves are keys later versions may add to a record;
+//! per-frame messages, connection changes and I/O outcomes are
+//! reserved: they are keys later versions may add to a record;
 //! version 1 writes none and refuses a record that carries any. Version
 //! 2 (`v2.rs`), written only for a cart that declares the `net`
 //! service, adds the network events admitted per frame and the

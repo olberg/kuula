@@ -9,15 +9,24 @@ description = "Kuula command line."
 name = "kuula"
 path = "src/main.rs"
 
+[features]
+default = ["net"]
+# Iroh networking: `--net`, the shell's network screens, `kuula net`,
+# `net_sim --loopback` and the MCP `net` argument. Build the handheld
+# binary with `--no-default-features`.
+net = ["dep:kuula-net"]
+
 [dependencies]
 kuula-core.workspace = true
 kuula-lua.workspace = true
 kuula-host-sdl.workspace = true
 kuula-host-headless.workspace = true
 kuula-mcp.workspace = true
-# Only `net_cmd` constructs a `Net`; see docs/net.md.
-kuula-net = { path = "../kuula-net" }
+# Host-owned cart transport and diagnostics. Optional so the handheld
+# build carries no tokio, QUIC or TLS.
+kuula-net = { path = "../kuula-net", optional = true }
 clap.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 png.workspace = true

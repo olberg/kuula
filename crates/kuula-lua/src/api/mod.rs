@@ -213,11 +213,11 @@ impl Binding {
     }
 }
 
-/// The marker the public export drops lines on. Descriptor text may
-/// not carry it: the reference is public, and a dropped line inside a
-/// generated section would fail the freshness check of the public copy.
-/// Spelled in two pieces so this declaration is not itself a line the
-/// export drops; a test walks the tree for any other such line.
+/// The marker of a line that a copy of this tree may leave out.
+/// Descriptor text may not carry it: a line dropped inside a generated
+/// section would fail the freshness check of the reference in that copy.
+/// Spelled in two pieces so this declaration is not itself a marked
+/// line; a test walks the tree for any other such line.
 pub const INTERNAL_MARKER: &str = concat!("[inter", "nal]");
 
 /// Declare a descriptor `static`. Only the fields given are set; the

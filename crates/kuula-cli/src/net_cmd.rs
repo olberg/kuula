@@ -13,8 +13,8 @@
 //! Exit codes: 0 for a clean session, 2 for usage (clap), 3 for every
 //! `net_*` failure, printed as `error: <code> <detail>` on stderr. A
 //! lost peer is `net_connect peer lost: ...`, distinct from a clean
-//! close. This is the only place in the binary that constructs a
-//! `Net`; `run`, `shell`, `mcp` and `worker` never reach this module.
+//! close. Cart play uses IrohTransport separately; the worker never
+//! constructs an endpoint or reaches this diagnostic.
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use kuula_net::{Code, Event, Net, NetConfig, NetError, Session};
 
 /// Exit code for a `net_*` failure.
@@ -34,6 +34,27 @@ const POLL: Duration = Duration::from_millis(200);
 /// How long `--say` waits for the peer's greeting before leaving.
 const SAY_GRACE: Duration = Duration::from_secs(2);
 
+#[derive(Args)]
+pub struct RelayArgs {
+    #[arg(long)]
+    relay: Option<String>,
+    #[arg(long, requires = "relay")]
+    relay_only: bool,
+}
+impl RelayArgs {
+    pub(crate) fn config(self, bind: Option<SocketAddr>) -> NetConfig {
+        NetConfig {
+            enabled: true,
+            bind,
+            cancel: Some(INTERRUPTED.clone()),
+            relay: kuula_net::config::RelayConfig {
+                url: self.relay,
+                only: self.relay_only,
+            },
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum NetCommand {
     /// Print a ticket and wait for one peer.
@@ -41,6 +62,8 @@ pub enum NetCommand {
         /// Bind this address only (default: every interface).
         #[arg(long)]
         bind: Option<SocketAddr>,
+        #[command(flatten)]
+        relay: RelayArgs,
         /// Name in the greeting.
         #[arg(long, default_value = "listener")]
         name: String,
@@ -51,6 +74,8 @@ pub enum NetCommand {
         /// Bind this address only (default: every interface).
         #[arg(long)]
         bind: Option<SocketAddr>,
+        #[command(flatten)]
+        relay: RelayArgs,
         /// Name in the greeting.
         #[arg(long, default_value = "joiner")]
         name: String,
@@ -70,24 +95,17 @@ pub enum NetCommand {
 /// so a connect, a handshake wait, a ping or a full queue returns
 /// `net_cancelled` within its poll interval instead of running to its
 /// own deadline.
-static INTERRUPTED: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBool::new(false)));
+pub(crate) static INTERRUPTED: LazyLock<Arc<AtomicBool>> =
+    LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 
-fn interrupted() -> bool {
+pub(crate) fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::SeqCst)
-}
-
-fn config(bind: Option<SocketAddr>) -> NetConfig {
-    NetConfig {
-        enabled: true,
-        bind,
-        cancel: Some(INTERRUPTED.clone()),
-    }
 }
 
 /// Ctrl+C and Ctrl+Break set a flag the waits below poll, so an open
 /// session gets its `Bye` before the process leaves.
 #[cfg(windows)]
-fn install_ctrl_handler() {
+pub(crate) fn install_ctrl_handler() {
     use windows_sys::Win32::System::Console::{
         SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT,
     };
@@ -106,22 +124,23 @@ fn install_ctrl_handler() {
 }
 
 #[cfg(not(windows))]
-fn install_ctrl_handler() {}
+pub(crate) fn install_ctrl_handler() {}
 
 pub fn main(command: NetCommand) -> u8 {
     install_ctrl_handler();
     let result = match command {
-        NetCommand::Listen { bind, name } => listen(bind, &name),
+        NetCommand::Listen { bind, name, relay } => listen(relay.config(bind), &name),
         NetCommand::Join {
             ticket,
             bind,
+            relay,
             name,
             say,
             repeat,
             stay,
         } => join(
             &ticket,
-            bind,
+            relay.config(bind),
             &name,
             say.as_deref().map(|s| (s, repeat, stay)),
         ),
@@ -144,8 +163,8 @@ fn say(line: impl std::fmt::Display) {
     let _ = std::io::stdout().flush();
 }
 
-fn listen(bind: Option<SocketAddr>, name: &str) -> Result<u8, NetError> {
-    let net = Net::new(&config(bind))?;
+fn listen(config: NetConfig, name: &str) -> Result<u8, NetError> {
+    let net = Net::new(&config)?;
     let mut listener = net.listen()?;
     say(format!("ticket: {}", listener.ticket()));
     say(format!("id: {}", net.id()));
@@ -165,11 +184,11 @@ fn listen(bind: Option<SocketAddr>, name: &str) -> Result<u8, NetError> {
 
 fn join(
     ticket: &str,
-    bind: Option<SocketAddr>,
+    config: NetConfig,
     name: &str,
     say_text: Option<(&str, u32, bool)>,
 ) -> Result<u8, NetError> {
-    let net = Net::new(&config(bind))?;
+    let net = Net::new(&config)?;
     say(format!("id: {}", net.id()));
     let session = net.join(ticket)?;
     let mut session = greet(session, name)?;
@@ -216,6 +235,7 @@ fn greet(mut session: Session, name: &str) -> Result<Session, NetError> {
         .and_then(|()| session.ping());
     match opened {
         Ok(rtt) => {
+            say(format!("path: {}", session.path()));
             say(format!("ping: {:.2} ms", rtt.as_secs_f64() * 1000.0));
             Ok(session)
         }

@@ -102,6 +102,7 @@ impl LuaGuest {
     /// `source` under `name` without running it. A syntax error is a
     /// `compile_error` fault.
     pub fn new(source: &str, name: &str) -> Result<LuaGuest, Fault> {
+        numeric::pin_fp_environment();
         let libs = StdLib::MATH | StdLib::STRING | StdLib::TABLE | StdLib::UTF8 | StdLib::COROUTINE;
         let lua = Lua::new_with(libs, LuaOptions::default())
             .map_err(|e| fault_from_lua(&e, name, Fault::RUNTIME_ERROR))?;
@@ -204,8 +205,7 @@ impl LuaGuest {
         Ok(())
     }
 
-    /// The soft heap cap: collect, re-check, never re-run (architecture
-    /// 7.3).
+    /// The soft heap cap: collect, re-check, never re-run.
     fn check_heap(&self) -> Result<(), Fault> {
         if self.lua.used_memory() <= LUA_HEAP_SOFT_CAP {
             return Ok(());

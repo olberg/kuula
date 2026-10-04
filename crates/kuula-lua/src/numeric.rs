@@ -188,6 +188,42 @@ routed!(EXP, "exp", "math.exp(x)");
 routed!(ATAN, "atan", "math.atan(y, [x])");
 routed!(LOG, "log", "math.log(x, [base])");
 
+/// Put this thread's floating-point control state back to what the
+/// numeric profile assumes: round to nearest, subnormals kept, no
+/// flush-to-zero, no default-NaN mode.
+///
+/// A library can change it just by being loaded. The `libz.so.1` that
+/// ships with the Miyoo Mini's SDL2 fork is a fast-math build, so on the
+/// handheld the `kuula` binary started with FPSCR's flush-to-zero bit on
+/// and printed `0.0` for `5e-324 * 16`, where the
+/// desktop prints `7.9050503334599e-323`. The state is per thread and
+/// inherited by threads made afterwards, so it is set when a guest is
+/// created, on the thread that will step it. Only the architectures a
+/// build exists for are handled; the others keep what the OS gave them.
+pub fn pin_fp_environment() {
+    #[cfg(target_arch = "arm")]
+    // SAFETY: reads and writes FPSCR only; clears AHP, DN, FZ and the
+    // rounding mode (bits 26 to 22).
+    unsafe {
+        std::arch::asm!(
+            "vmrs {t}, fpscr",
+            "bic {t}, {t}, #0x07c00000",
+            "vmsr fpscr, {t}",
+            t = out(reg) _,
+            options(nomem, nostack),
+        );
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: reads and writes MXCSR only; clears flush-to-zero (15),
+    // denormals-are-zero (6) and the rounding mode (14 to 13).
+    unsafe {
+        let mut csr: u32 = 0;
+        std::arch::asm!("stmxcsr [{p}]", p = in(reg) &mut csr, options(nostack));
+        csr &= !((1 << 15) | (1 << 6) | (3 << 13));
+        std::arch::asm!("ldmxcsr [{p}]", p = in(reg) &csr, options(nostack));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +270,38 @@ mod tests {
     fn pow_special_case() {
         assert_eq!(kuu_numpow(3.0, 2.0), 9.0);
         assert_eq!(kuu_numpow(2.0, 10.0), 1024.0);
+    }
+
+    /// The state a loaded library can leave behind, set by hand.
+    #[cfg(any(target_arch = "arm", target_arch = "x86_64"))]
+    fn flush_to_zero() {
+        #[cfg(target_arch = "arm")]
+        unsafe {
+            std::arch::asm!(
+                "vmrs {t}, fpscr",
+                "orr {t}, {t}, #0x01000000",
+                "vmsr fpscr, {t}",
+                t = out(reg) _,
+                options(nomem, nostack),
+            );
+        }
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let mut csr: u32 = 0;
+            std::arch::asm!("stmxcsr [{p}]", p = in(reg) &mut csr, options(nostack));
+            csr |= (1 << 15) | (1 << 6);
+            std::arch::asm!("ldmxcsr [{p}]", p = in(reg) &csr, options(nostack));
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "arm", target_arch = "x86_64"))]
+    fn pinning_restores_subnormals() {
+        use std::hint::black_box;
+        flush_to_zero();
+        assert_eq!(black_box(f64::MIN_POSITIVE) * black_box(0.25), 0.0, "setup");
+        pin_fp_environment();
+        let sub = black_box(f64::MIN_POSITIVE) * black_box(0.25);
+        assert!(sub > 0.0 && sub < f64::MIN_POSITIVE, "{sub:e}");
     }
 }

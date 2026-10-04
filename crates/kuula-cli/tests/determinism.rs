@@ -15,7 +15,10 @@ use kuula_lua::LuaGuest;
 /// survived the drawing API. Folding each frame's audio into the hash
 /// after the palette changed it; the cart is silent, so the pixels are
 /// as before and only the 1470 zero bytes per frame moved the value.
-const HELLO_HASH: u64 = 0x892b2d0255430ec2;
+/// The Unscii system font moved it again: the cart prints two lines.
+/// Stereo audio doubled the silent bytes per frame to 2940:
+/// the frames are as before, and only the audio part of the hash moved.
+const HELLO_HASH: u64 = 0x2be942b74b2e7223;
 const HELLO_FRAMES: u64 = 120;
 
 /// The scripted input: ten-frame runs of each button, then a chord, then

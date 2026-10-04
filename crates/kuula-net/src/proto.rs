@@ -1,6 +1,6 @@
-//! Wire protocol version 1, as `docs/net.md` specifies it: the ALPN, the
-//! handshake frame and the five message frames (`Data` was added to
-//! version 1 before any release). Everything here is pure:
+//! Wire protocol version 1: the ALPN, the handshake frame and the five
+//! message frames (`Data` was added to version 1 before any release).
+//! Everything here is pure:
 //! bytes in, bytes or a stable error code out, so the limits are tested
 //! without a socket. Integers are big-endian.
 
@@ -11,7 +11,9 @@ use crate::{Code, NetError};
 /// The ALPN of wire protocol version 1. The number is [`VERSION`].
 pub const ALPN: &[u8] = b"kuula/play/1";
 
-/// Reserved for a future deploy channel; never registered.
+/// The deploy channel's ALPN (`deploy`). Only a deploy endpoint registers
+/// it, and a deploy endpoint never registers [`ALPN`]; this file stays
+/// the play protocol.
 pub const DEPLOY_ALPN: &[u8] = b"kuula/deploy/1";
 
 /// The protocol version carried in the handshake.

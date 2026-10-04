@@ -5,7 +5,7 @@
 //! defaults with a note on stderr, and a write failure is reported and
 //! otherwise ignored. Nothing here is reachable from a cart.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use kuula_core::shell::Settings;
 
@@ -18,6 +18,13 @@ const MAX_BYTES: u64 = 64 * 1024;
 pub fn path() -> Option<PathBuf> {
     let root = kuula_core::save::default_save_root()?;
     Some(root.parent()?.join(FILE))
+}
+
+/// The directory `settings.kv` lives in: where the deploy key and
+/// approved list (`deploy/`) are kept.
+#[cfg(feature = "net")]
+pub fn data_dir() -> Option<PathBuf> {
+    Some(path()?.parent()?.to_path_buf())
 }
 
 /// Parse the text form; unparsable lines are skipped.
@@ -63,12 +70,10 @@ pub fn render(s: &Settings) -> String {
     )
 }
 
-/// The settings on disk over `defaults`, or the defaults.
-pub fn load(defaults: Settings) -> Settings {
-    let Some(path) = path() else {
-        return defaults;
-    };
-    match std::fs::metadata(&path) {
+/// A `key = value` file parsed over `defaults`: a missing file yields the
+/// defaults silently, an oversized or unreadable one with a note on stderr.
+pub fn load_file<T>(path: &Path, defaults: T, parse: impl FnOnce(&str, T) -> T) -> T {
+    match std::fs::metadata(path) {
         Ok(m) if m.len() > MAX_BYTES => {
             eprintln!("settings: {} is too large; using defaults", path.display());
             return defaults;
@@ -76,7 +81,7 @@ pub fn load(defaults: Settings) -> Settings {
         Ok(_) => {}
         Err(_) => return defaults,
     }
-    match std::fs::read_to_string(&path) {
+    match std::fs::read_to_string(path) {
         Ok(text) => parse(&text, defaults),
         Err(e) => {
             eprintln!("settings: cannot read {}: {e}", path.display());
@@ -85,15 +90,28 @@ pub fn load(defaults: Settings) -> Settings {
     }
 }
 
+/// Write a settings file, creating its directory.
+pub fn save_file(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, text)
+}
+
+/// The settings on disk over `defaults`, or the defaults.
+pub fn load(defaults: Settings) -> Settings {
+    match path() {
+        Some(path) => load_file(&path, defaults, parse),
+        None => defaults,
+    }
+}
+
 /// Write the settings; a failure is reported, not fatal.
 pub fn save(s: &Settings) {
     let Some(path) = path() else {
         return;
     };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Err(e) = std::fs::write(&path, render(s)) {
+    if let Err(e) = save_file(&path, &render(s)) {
         eprintln!("settings: cannot write {}: {e}", path.display());
     }
 }

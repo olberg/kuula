@@ -1,0 +1,23 @@
+The Open Module Track engine, copied from its own repository by a script.
+Do not edit these files: change the engine upstream and copy it again.
+
+left out: ffi.rs, pico8.rs, the test modules, the programs
+
+files (SHA-256):
+  6d93caea3e240d35383f0c9d05f49b199e01f9fe74c9773cbaacec4b35171f3a  Cargo.toml
+  b83b4938221a2e77683776421e845da677842b7c8c1f8d7119e53de5c12b280c  LICENSE
+  d39a2da13bbf3a216ce1e37f966bc1d825f56a727e0ef9599a5007c5f6c076e2  rustfmt.toml
+  ae04d0d321a0248ac669e6a0f0e0a951f37f9a4df2e5b21f06716e85d4ac1a8b  src/cell.rs
+  a52265059a7c36df415cca0c5d2a2056825cc0f383ce1539b052675db6ae152c  src/flac.rs
+  30a3c1716bcee2d98261ee6ffef89b04c829af6b470264aa7bc68874e3aa7d6f  src/lib.rs
+  243ac7933e4a7320216b1639313fa559dd21bcfdf3b593ff7219cf1b959c57fd  src/ogg.rs
+  80010c19ca6dd40aa0e7bfb5b48219ccadae22f5b8249eb1b9e99626de048f82  src/omc.rs
+  7e58dc247c6b3c222d7a9ea7303fa64c062e633fdb785340efe6b7ce7205b5f7  src/player.rs
+  6a57d2316cb21c3cd1dc8db73352ed81735fcb51dec24c32ddf65a76a5f4dda8  src/player/cells.rs
+  4ec0858d747f31ed7994c4bb5678c260f469694ada335e7dfdc5002a0a02d8f5  src/player/voice.rs
+  954bd0c2cd5dea8039dad7e7f144a885b952a906dc765c4231aeee6e91f593d9  src/song.rs
+  ab8220de043131844eb45a007f98b95cdb6da8e99a82014401a3ca7df22083f3  src/song/ijson.rs
+  58ef5893019c75d40c78854b6f6020f043f2990eb505c4bfba55c6e5177ac928  src/song/instruments.rs
+  b38c5dac4ebb81a5bb253ff9125e403031187fd77409f5711922ab8f3f01fda5  src/song/load.rs
+  8f76e3d6994b74d50ddfc3a52a8da82d3eb193a61f10f4e63cfb6dfa615037bc  src/song/profile.rs
+  fd153a2a8c16c5432176db7660c4a4265663951e19bd4d0ecbc00b75a65141d7  src/tables.rs

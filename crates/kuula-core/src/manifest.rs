@@ -5,6 +5,9 @@ use std::fmt;
 
 use serde::Deserialize;
 
+mod license;
+pub use license::License;
+
 pub const MANIFEST_FILE: &str = "cart.toml";
 
 /// The one screen mode a cart declares.
@@ -61,6 +64,8 @@ impl Service {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Manifest {
     pub title: String,
+    pub author: String,
+    pub license: Option<License>,
     pub screen_mode: ScreenMode,
     /// Sheet names decoded at boot, `gfx/<name>.png`.
     pub preload_sheets: Vec<String>,
@@ -90,6 +95,10 @@ struct File {
 struct CartSection {
     #[serde(default)]
     title: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    license: Option<License>,
     #[serde(default)]
     screen_mode: ScreenMode,
     #[serde(default)]
@@ -158,10 +167,24 @@ impl Manifest {
         };
         names(&file.preload.sheets, "sheets")?;
         names(&file.preload.maps, "maps")?;
+        if let Some(license) = &file.cart.license {
+            license.validate().map_err(|message| ManifestError {
+                message,
+                line: None,
+            })?;
+        }
+        if file.cart.author.len() > 128 || file.cart.author.chars().any(char::is_control) {
+            return Err(ManifestError {
+                message: "author must be at most 128 UTF-8 bytes without control characters".into(),
+                line: None,
+            });
+        }
         let mut services = file.cart.services;
         services.dedup();
         Ok(Manifest {
             title: file.cart.title,
+            author: file.cart.author,
+            license: file.cart.license,
             screen_mode: file.cart.screen_mode,
             preload_sheets: file.preload.sheets,
             preload_maps: file.preload.maps,

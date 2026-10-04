@@ -1,10 +1,10 @@
 ---
 title: Kuula cart API reference
 status: current; the reference tables are generated from the binding descriptors in `crates/kuula-lua/src` (`cargo run -p kuula-apidoc -- --check`)
-version: 0.0.7
 date: 2026-09-11
 related:
   - skill.md (constraints and idioms; read it first)
+  - songs.md (the appendix: the song files `sfx` and `music` play)
 ---
 
 # Kuula cart API
@@ -89,6 +89,7 @@ Pixels touched are counted after clipping; that count is what you pay.
 | `clip()` | nothing; resets to the whole target | 1 |
 | `camera([x, y])` | nothing; `camera()` resets to `(0, 0)` | 1 |
 | `fillp([pattern, transparent])` | nothing | 1 |
+| `font([h])` | nothing; `font()` returns to the default | 1 |
 
 - `cls`: Fills the clip rectangle of the draw target. Defaults: `c` = 0.
 - `pset`: Defaults: `c` = 7.
@@ -99,15 +100,23 @@ Pixels touched are counted after clipping; that count is what you pay.
   draw huge circles off screen. Defaults: `c` = 7.
 - `circfill`: Priced like `circ`: by the radius even when mostly
   clipped. Defaults: `c` = 7.
-- `print`: The drawing form needs numeric `x` and `y`. The system font
-  is 4x6 pixels per glyph; text ignores `fillp`. Any other call shape,
-  such as `print("x =", x)`, is the logging form. Defaults: `c` = 7.
+- `print`: The drawing form needs numeric `x` and `y`. Text is drawn
+  with the system face `font` selected, 8x8 or 8x16 pixels per glyph,
+  and ignores `fillp`. Text is UTF-8: Latin, Greek, Cyrillic, box
+  drawing and block graphics draw; anything the face lacks draws a
+  hollow box. Any other call shape, such as `print("x =", x)`, is the
+  logging form. Defaults: `c` = 7.
 - `clip`: Any other number of arguments is a Lua error.
 - `camera`: Defaults: `x` = 0, `y` = 0.
 - `fillp`: `pattern` is a 16-bit 4x4 dither; bit `(y % 4) * 4 + (x % 4)`
   set selects the secondary colour, or skips the pixel when
   `transparent` is true. `fillp()` clears it. Circles and lines honour
   it; text does not. Defaults: `pattern` = 0, `transparent` = false.
+- `font`: Selects the system face `print` draws with by its glyph
+  height: 8 for unscii-8 (8x8) or 16 for unscii-16 (8x16). The default
+  is 8 at 320x240 and 16 at 640x480, so a screen holds 30 rows of text
+  either way; `stat("font")` reads the height in use. Any other value is
+  a Lua error.
 <!-- /generated -->
 
 ### Palette calls
@@ -267,8 +276,9 @@ no other buttons.
   a float that can pass 1 on frame 1), `"cpu_cycles"`, `"cpu_budget"`,
   `"mem"` (Lua heap bytes), `"mem_limit"` (16 MiB), `"gfx_mem"`,
   `"gfx_limit"` (8 MiB), `"frame"` (the frame being run, 1-based),
-  `"width"` and `"height"` (the screen size the manifest chose). With
-  the `net` service: `"net_sent"`, `"net_received"`, `"net_dropped"` and
+  `"width"` and `"height"` (the screen size the manifest chose),
+  `"font"` (the glyph height `print` draws with, 8 or 16). With the
+  `net` service: `"net_sent"`, `"net_received"`, `"net_dropped"` and
   `"net_inbox"` (the counters and the unread events). Any other name is
   a Lua error.
 <!-- /generated -->
@@ -358,27 +368,42 @@ split the work.
 
 ## Audio
 
-Eight channels, 44.1 kHz mono, rendered per frame. Sounds come from
-`sfx/*.trk` and `music/*.trk` (tracker text) and `samples/*.wav` (8 or
-16-bit mono PCM, 2 MiB in total). A name is the file's stem, as for
+Eight channels, 44.1 kHz stereo, rendered per frame. Sounds come from
+`sfx/*.omc` and `music/*.omc` (one Open Module Track song each, in the
+`kuula` profile) and `samples/*.wav` (8 or 16-bit mono PCM). Songs and
+WAV files share 2 MiB of sample data. A name is the file's stem, as for
 `load_sheet`. Audio rendering is not charged; each call costs 1 cycle.
+[Appendix: song files](songs.md#appendix-song-files) describes an `.omc`
+file closely enough to write one from a script.
+
+Music takes channels 0 upward, one per channel of its song, and starting
+it cuts the music before it. A channel the song marks `reserved` is left
+to effects. An effect takes a run of consecutive channels, one per channel
+of its song, and a sample takes one. With a channel named, the sound goes
+there and cuts what holds it. Without one it goes to channels the music
+does not use, highest first, then to music channels that are quiet, then
+to one that is sounding, and it cuts another effect only when every run is
+held. While an effect or a sample holds a music channel, the music goes on
+in time and is silent there. `volume(channel, v)` stays with the channel
+through whatever plays on it. A call takes effect at the first sample of
+the frame it is made in.
 
 <!-- generated: audio -->
 | call | returns | cycles |
 |---|---|---|
 | `sfx(name, [channel])` | the channel it plays on | 1 |
-| `music(name, [fade])` | nothing; starts the track, fading over `fade` frames | 1 |
-| `music()` | nothing; stops the track | 1 |
-| `music(nil, fade)` | nothing; stops the track over `fade` frames | 1 |
+| `music(name, [fade])` | nothing; starts the song, fading in over `fade` frames | 1 |
+| `music()` | nothing; stops the music | 1 |
+| `music(nil, fade)` | nothing; fades the music out over `fade` frames | 1 |
 | `sample(name, [channel, pitch])` | the channel it plays on | 1 |
 | `volume(channel, v)` | nothing; channel gain 0.0 to 1.0, clamped | 1 |
 
-- `sfx`: `name` is the stem of `sfx/<name>.trk`. Defaults: `channel` = a
-  free one. Errors: `asset_not_found`, `asset_invalid`, `track_error`,
-  `audio_bad_channel`, `audio_no_room`.
-- `music`: `name` is the stem of `music/<name>.trk`. Defaults: `fade` =
-  0. Errors: `asset_not_found`, `asset_invalid`, `track_error`,
-  `audio_bad_channel`, `audio_no_room`.
+- `sfx`: `name` is the stem of `sfx/<name>.omc`. Defaults: `channel` = a
+  free one. Errors: `asset_not_found`, `asset_invalid`, `song_error`,
+  `sample_error`, `audio_bad_channel`, `audio_no_room`.
+- `music`: `name` is the stem of `music/<name>.omc`. Defaults: `fade` =
+  0. Errors: `asset_not_found`, `asset_invalid`, `song_error`,
+  `sample_error`.
 - `sample`: `name` is the stem of `samples/<name>.wav`. `pitch` 1.0 is
   native, clamped to 1/256 to 16. Defaults: `channel` = a free one,
   `pitch` = 1.0. Errors: `asset_not_found`, `asset_invalid`,
@@ -387,9 +412,9 @@ Eight channels, 44.1 kHz mono, rendered per frame. Sounds come from
 <!-- /generated -->
 
 Audio errors are Lua errors: `asset_not_found` and `asset_invalid` for
-the file, `track_error` and `sample_error` for its contents,
+the file, `song_error` and `sample_error` for its contents,
 `audio_bad_channel` for a channel outside 0 to 7, and `audio_no_room`
-when a track has more columns than fit from the channel asked for.
+when a song has more channels than fit from the channel asked for.
 
 ## Numeric profile
 
@@ -537,6 +562,82 @@ the shape.
 - `net.leave`: A `disconnected` event with reason `closed` follows.
 <!-- /generated -->
 
+## Networking simulation and compatibility
+
+Normal network runs exchange a bounded host-owned compatibility greeting
+before the cart receives `connected`. It contains the SHA-256 digest of
+all served snapshot entries and the runtime/network profile. Different
+content or profiles yield `net_handshake` with a readable detail; the
+listener closes, its ticket clears and the cart can host again. Greetings
+never enter cart messages or recordings. A digest identifies bytes, not a
+trusted author or permission to run code. The old replay FNV identity stays
+unchanged and is not a security check.
+
+`kuula net_sim CART --scenario scenario.json --out DIR` and the MCP
+`net_sim` tool use the same deterministic two-console harness. Both peers'
+event batches are polled before either cart advances; frame commands are
+submitted after both steps. Host is peer 0, joiner peer 1. `--peer-cart`
+(or MCP `peer_cart`) defaults to the same cart and can test mismatch refusal.
+A scenario is a JSON object with optional `config`, `host_input`, and
+`join_input` fields. Unknown fields are errors. Inputs use the ordinary
+input-script format. Example:
+
+```json
+{
+  "config": {
+    "frames": 180,
+    "delay": 3,
+    "capacity": 16,
+    "stalls": [{"peer": 1, "start": 30, "end": 60}],
+    "disconnect": 150,
+    "state": ["game"]
+  },
+  "host_input": [{"frames": 70}, {"buttons": ["a"]}],
+  "join_input": [{"frames": 100}, {"buttons": ["a"]}]
+}
+```
+
+Frames count from one. `delay` counts delivery polls: one per unstalled
+frame with inbox room. Stalls pause those polls (including delay progress)
+on `[start,end)`. The queue capacity applies to messages; all transport
+events remain capped at 256. Once a stalled sender's failure-report queue
+fills, further failure reports are discarded until it drains; terminal
+transitions replace obsolete traffic if necessary. Disconnect discards
+both sessions and queued events at the start of the selected frame; a cart
+that hosts or joins again afterwards gets `failed` with `net_connect`, so its
+status ends deterministically.
+
+Defaults: 180 frames, delay 0, capacity 256, no stalls/disconnect, state
+`["game"]`. Bounds: 1..=3600 frames and input entries per peer, delay at most
+299 polls, capacity 1..=256, at most 128 stall ranges of which no contiguous
+run may exceed 299 frames per peer (both bounds keep the delivery of the
+compatibility greeting under its 600-poll timeout, so identical carts always
+connect), and 128 global names of 1..=128 bytes. Retained logs are capped at 64 KiB/4096 lines per peer;
+`logs_truncated` reports overflow. State dumps use the existing bounded
+codec; transcripts use its existing 64 MiB limit. A fault stops the pair
+and is reported with both peers' last output. `state_error` reports an
+unavailable state dump. Each run is independent, with fresh memory saves.
+
+Outputs: `run.json` holds both peers' canonical state and state hash,
+per-frame pixel/palette/PCM hashes, logs, faults and metadata. `host.png`
+and `join.png` are final captures; `host.kr`/`join.kr` are ordinary version-2
+transcripts; `host-hashes.txt`/`join-hashes.txt` pin every frame. Replay each
+with `kuula run CART --headless --replay DIR/host.kr` (or MCP `replay`).
+MCP takes `{cart, peer_cart?, scenario?}`, returns both images, the report
+and a temporary artifact directory, and works without a networking service.
+Simulation takes no console slot and retains no live handles.
+
+Use `examples/marbles/scenarios/win.json` for a complete game and
+`delayed.json`, `stalled.json`, `disconnect.json`, or `rematch.json` to
+exercise other outcomes. `stalled.json` reproduces a missed scripted move;
+its saved transcripts reproduce that incomplete game without a peer.
+
+`--loopback` is a separate real-Iroh adapter check, paced to 60 Hz and
+labelled `iroh-loopback` in the report. Delay/stall/capacity knobs are
+rejected there. It is not the reproducible oracle. This explicitly resolves
+the earlier drafts: `net_sim` means memory simulation; real Iroh requires
+this flag. Neither mode proves a two-machine or internet connection.
+
 ## `cart.toml`
 
 Every key is optional; unknown keys are a `manifest_error` with a line.
@@ -544,6 +645,8 @@ Every key is optional; unknown keys are a `manifest_error` with a line.
 ```toml
 [cart]
 title = "My cart"          # shown by the host; untrusted text elsewhere
+author = "Ada Example"    # optional name, at most 128 UTF-8 bytes
+license = "MIT"           # optional exact SPDX identifier
 screen_mode = "640x480"    # or "320x240"; default 640x480
 services = ["net"]         # host services the cart may use; only "net" exists
 
@@ -551,6 +654,17 @@ services = ["net"]         # host services the cart may use; only "net" exists
 sheets = ["tiles", "hero"] # gfx/tiles.png, gfx/hero.png decoded at boot
 maps = ["overworld"]       # map/overworld.json decoded at boot
 ```
+
+A split license uses `license.code = "MIT"` and
+`license.assets = "CC-BY-4.0"` instead of the single `license` value.
+Both split fields are required; unknown fields and unknown SPDX identifiers
+are rejected. Expressions and trailing `+` shorthand are not identifiers.
+The pinned SPDX 0.13.4 license list defines the accepted names. Author text
+cannot contain control characters. Missing metadata remains valid.
+The shell cart list's B opens its info screen; MCP `run`, `state` and
+`net_sim` return author/license metadata. Titles and authors are untrusted
+cart-provided text. The shell boot screen waits for A or B; a fresh press
+on the list is required to launch a cart.
 
 Preloaded assets are live before `_init`, so `load_sheet("tiles")`
 costs 1 cycle. Names are one path component of letters, digits, `_` and
@@ -648,24 +762,37 @@ cart never has `sys`; nothing here is cart API.
 <!-- generated: shell -->
 | call | returns | cycles |
 |---|---|---|
-| `sys.carts()` | a list of `{name, title}` tables, one per installed cart | 1 |
+| `sys.carts()` | a list of `{name, title, author, license, network}` tables; license is display text or nil | 1 |
 | `sys.run(name)` | nothing; asks the host to start the named cart | 1 |
 | `sys.quit()` | nothing; asks the host to stop the running cart | 1 |
 | `sys.restart()` | nothing; asks the host to restart the running cart | 1 |
 | `sys.paused(on)` | nothing; pauses or resumes the running cart | 1 |
 | `sys.is_paused()` | whether the cart is paused | 1 |
 | `sys.running()` | whether a cart is running | 1 |
+| `sys.host_started()` | whether the host started a cart itself since the last call | 1 |
 | `sys.menu()` | whether the menu button was pressed this frame | 1 |
 | `sys.fault()` | the running cart's fault as `{code, file, line, message}`, or `nil` | 1 |
 | `sys.settings()` | `{scale, volume, net}` | 1 |
 | `sys.set_net(on)` | nothing; grants or withdraws networking for carts the shell runs | 1 |
 | `sys.set_scale(n)` | nothing; asks the host for window scale `n`, 1 to 4 | 1 |
 | `sys.set_volume(v)` | nothing; asks the host for volume `v`, 0 to 100 | 1 |
+| `sys.network()` | host UI status, ended, detail, unavailable, ticket, path, relay, relay_only, discovery, discovery_detail, candidates, editing, text and network_profile | 1 |
+| `sys.run_network(name, invite?)` | start the cart with an optional join ticket; permission is a separate setting | 1 |
+| `sys.net_action(action, value?, on?)` | queue browse(name), discovery(on), relay(url,on), edit(ticket/relay/empty), text(value), copy or paste | 1 |
 
 - `sys.set_net`: Withdrawing it while a cart has a session ends the
   session; the cart sees a `permission` event with `granted = false`.
 - `sys.set_scale`: A scale outside 1 to 4 is a Lua error.
 - `sys.set_volume`: A volume outside 0 to 100 is a Lua error.
+- `sys.network`: Host diagnostics and LAN candidates are shell-only;
+  they never enter cart state or replay. Candidates are untrusted hints,
+  not approval to launch or join.
+- `sys.run_network`: The cart still initiates host/join through
+  net.host/net.join. A supplied ticket becomes net.invite(). A normal
+  sys.run clears the invite.
+- `sys.net_action`: Discovery and relay configuration are explicit host
+  actions. Relay changes require ending the current cart. Copy/paste use
+  the desktop clipboard only after a player action.
 <!-- /generated -->
 
 ## Faults

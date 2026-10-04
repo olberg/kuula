@@ -1,4 +1,5 @@
 [cart]
+license = "MIT"
 title = "Tiles"
 screen_mode = "320x240"
 

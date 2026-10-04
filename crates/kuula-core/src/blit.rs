@@ -2,7 +2,6 @@
 //! layers and system-font text. No fill pattern applies to these.
 
 use crate::buf::{Buf, Rect};
-use crate::font::{self, GLYPH_WIDTH};
 use crate::pen::Pen;
 use crate::raster::{blend, Surface};
 
@@ -161,29 +160,24 @@ pub fn map(
     }
 }
 
-/// Text with the system font: camera, clip and colour table, no fill
-/// pattern. Returns the x after the last glyph in cart coordinates.
+/// Text with the pen's system face: camera, clip and colour table, no
+/// fill pattern. Returns the x after the last glyph in cart coordinates.
 pub fn print(s: &mut Surface, pen: &Pen, text: &str, x: i32, y: i32, c: u8) -> i32 {
+    let font = pen.font.font();
     let (wx, wy) = pen.world(x, y);
     let mut cx = wx;
     let mut end = x;
     for ch in text.chars() {
-        let g = font::glyph(ch);
-        for (row, bits) in g.iter().enumerate() {
-            for col in 0..3 {
-                if bits & (0b100 >> col) != 0 {
-                    blend(
-                        s,
-                        pen,
-                        cx.saturating_add(col),
-                        wy.saturating_add(row as i32),
-                        c,
-                    );
+        let g = font.glyph(ch);
+        for row in 0..g.height {
+            for col in 0..g.width {
+                if g.pixel(col, row) {
+                    blend(s, pen, cx.saturating_add(col), wy.saturating_add(row), c);
                 }
             }
         }
-        cx = cx.saturating_add(GLYPH_WIDTH);
-        end = end.saturating_add(GLYPH_WIDTH);
+        cx = cx.saturating_add(g.width);
+        end = end.saturating_add(g.width);
     }
     end
 }
@@ -306,26 +300,41 @@ mod tests {
 
     #[test]
     fn print_places_glyphs_and_returns_the_end() {
-        let (mut buf, mut pen) = surface(12, 8);
+        let (mut buf, mut pen) = surface(12, 10);
+        assert_eq!(
+            pen.font,
+            crate::font::FontId::Small,
+            "a small target starts small"
+        );
         let mut s = Surface::of(&mut buf).unwrap();
-        assert_eq!(print(&mut s, &pen, "A", 1, 1, 7), 1 + GLYPH_WIDTH);
+        assert_eq!(print(&mut s, &pen, "A", 1, 1, 7), 1 + 8);
         assert_eq!(print(&mut s, &pen, "", 5, 5, 7), 5);
         drop(s);
         let a = ascii(&buf);
-        assert_eq!(a[1], ".777........");
-        assert_eq!(a[2], ".7.7........");
-        assert_eq!(a[3], ".777........");
-        assert_eq!(a[5], ".7.7........");
-        assert_eq!(a[6], "............");
+        assert_eq!(a[0], "............");
+        assert_eq!(a[1], "....77......");
+        assert_eq!(a[2], "...7777.....");
+        assert_eq!(a[3], "..77..77....");
+        assert_eq!(a[5], "..777777....");
+        assert_eq!(a[8], "............");
         // Camera and clip apply; the return value is in cart coordinates.
         buf.fill(0.0);
         pen.camera = (1, 1);
         pen.clip = Rect::new(0, 0, 2, 8);
         let mut s = Surface::of(&mut buf).unwrap();
-        assert_eq!(print(&mut s, &pen, "AB", 1, 1, 7), 1 + 2 * GLYPH_WIDTH);
+        assert_eq!(print(&mut s, &pen, "AB", 1, 1, 7), 1 + 2 * 8);
         drop(s);
-        assert_eq!(ascii(&buf)[0], "77..........");
-        assert_eq!(ascii(&buf)[1], "7...........");
+        assert_eq!(ascii(&buf)[0], "............");
+        assert_eq!(ascii(&buf)[2], ".7..........");
+        // The large face is twice as tall and its wide glyphs advance 16.
+        buf.fill(0.0);
+        pen.camera = (0, 0);
+        pen.clip = Rect::new(0, 0, 12, 10);
+        pen.font = crate::font::FontId::Large;
+        let mut s = Surface::of(&mut buf).unwrap();
+        assert_eq!(print(&mut s, &pen, "|\u{23e9}", 0, 0, 7), 24);
+        drop(s);
+        assert!(ascii(&buf)[9].starts_with("...7"), "{:?}", ascii(&buf));
         // Far away coordinates are safe.
         let mut s = Surface::of(&mut buf).unwrap();
         print(&mut s, &pen, "hello", i32::MAX - 1, i32::MAX - 1, 7);

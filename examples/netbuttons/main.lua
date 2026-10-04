@@ -72,7 +72,7 @@ function _update(dt)
 end
 
 local function wrapped(text, x, y, width, colour)
-  local per = width // 4
+  local per = width // 8
   local line = 0
   for i = 1, #text, per do
     print(text:sub(i, i + per - 1), x, y + line * 8, colour)

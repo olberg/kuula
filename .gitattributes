@@ -3,3 +3,5 @@
 *.ico binary
 *.wav binary
 *.zip binary
+*.omc binary
+*.flac binary

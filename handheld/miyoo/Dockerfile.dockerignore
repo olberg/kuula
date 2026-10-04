@@ -1,0 +1,9 @@
+target
+.git
+dist
+docs/*
+!docs/api.md
+!docs/skill.md
+!docs/songs.md
+alien-invaders
+*.zip

@@ -1,6 +1,7 @@
 //! `kuula net listen` and `kuula net join` as two processes on
 //! loopback: a clean session, a killed joiner, bad tickets, an absent
 //! peer, and Ctrl+Break exiting within its bound.
+#![cfg(feature = "net")]
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, ExitStatus, Stdio};

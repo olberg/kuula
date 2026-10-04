@@ -1,5 +1,3 @@
 /target
-/.scratch
-/.internal-log.txt
-.claude/
-.scratch-*
+/dist
+__pycache__/

@@ -42,13 +42,12 @@ fn every_group_has_a_section_with_rows() {
     }
 }
 
-/// The public export drops every line carrying the internal marker
-/// from the public copy. The generated sections carry none, so the
-/// public copy passes the same check.
+/// A copy of the document without the lines that carry the internal
+/// marker passes the same check: the generated sections carry none.
 #[test]
-fn the_public_export_passes_the_check() {
+fn a_copy_without_marked_lines_passes_the_check() {
     let doc = doc();
-    let public: String = doc
+    let copy: String = doc
         .lines()
         .filter(|l| !l.contains(INTERNAL_MARKER))
         .map(|l| format!("{l}\n"))
@@ -56,14 +55,14 @@ fn the_public_export_passes_the_check() {
     for (key, body) in sections(&inventory()) {
         assert!(!body.contains(INTERNAL_MARKER), "{key}");
     }
-    if let Err(e) = check(&public) {
+    if let Err(e) = check(&copy) {
         panic!("{e}");
     }
 }
 
-/// The export drops whole lines, so a marker on a line of code (not a
-/// comment) would leave the public tree failing to build. Every
-/// source line carrying the marker must be a comment line.
+/// Such a copy leaves out whole lines, so a marker on a line of code
+/// (not a comment) would leave it failing to build. Every source line
+/// carrying the marker must be a comment line.
 #[test]
 fn the_marker_appears_only_on_comment_lines() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -95,7 +94,7 @@ fn the_marker_appears_only_on_comment_lines() {
     assert!(checked > 50, "walked only {checked} files");
     assert!(
         offenders.is_empty(),
-        "marker on code lines the export would drop:\n  {}",
+        "marker on lines of code:\n  {}",
         offenders.join("\n  ")
     );
 }

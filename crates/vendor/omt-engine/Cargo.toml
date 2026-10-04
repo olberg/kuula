@@ -1,0 +1,18 @@
+# Written from the engine's own Cargo.toml by the script that makes this
+# copy. Edit neither the copy nor this file.
+[package]
+name = "omt-engine"
+version = "0.1.0"
+edition = "2024"
+license = "MIT-0"
+description = "The Open Module Track engine: loads, validates and renders OMT songs (docs/omt.md)"
+
+[lib]
+name = "omt_engine"
+
+[dependencies]
+serde = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
+miniz_oxide = "0.8"
+crc32fast = "1"

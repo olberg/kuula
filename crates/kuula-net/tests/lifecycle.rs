@@ -9,6 +9,7 @@ use kuula_net::{Net, NetConfig};
 fn loopback() -> NetConfig {
     NetConfig {
         enabled: true,
+        relay: Default::default(),
         bind: Some("127.0.0.1:0".parse().unwrap()),
         cancel: None,
     }

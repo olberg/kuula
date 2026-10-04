@@ -69,6 +69,18 @@ impl InputScript {
         let runs: Vec<Run> = serde_json::from_str(text).map_err(|e| ScriptError {
             message: format!("input script: {e}"),
         })?;
+        InputScript::expand(runs)
+    }
+
+    /// [`InputScript::parse`] for a script already parsed as JSON.
+    pub fn from_value(value: serde_json::Value) -> Result<InputScript, ScriptError> {
+        let runs: Vec<Run> = serde_json::from_value(value).map_err(|e| ScriptError {
+            message: format!("input script: {e}"),
+        })?;
+        InputScript::expand(runs)
+    }
+
+    fn expand(runs: Vec<Run>) -> Result<InputScript, ScriptError> {
         let mut frames = Vec::new();
         let mut total: u64 = 0;
         for (i, run) in runs.iter().enumerate() {

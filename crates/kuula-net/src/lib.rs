@@ -1,10 +1,9 @@
 //! Host-side networking for Kuula over Iroh: the runtime, the endpoint
-//! and wire protocol version 1 (`docs/net.md`).
+//! and wire protocol version 1.
 //!
-//! Nothing here is reachable from a cart. `kuula-cli` builds a [`Net`]
-//! only inside its `net` diagnostic; `kuula run`, the shell, the MCP
-//! server and the worker never construct one, and the worker is denied
-//! the network by the OS besides.
+//! Endpoints belong to the host: permitted cart runs and the shell use
+//! IrohTransport, while the CLI diagnostic uses Net directly. Workers
+//! remain denied direct network access by the OS.
 //!
 //! The async lives inside this crate. A [`Net`] owns one current-thread
 //! tokio runtime driven by one dedicated thread, so a session keeps
@@ -12,6 +11,9 @@
 //! every public call is blocking with a bound, and dropping the `Net`
 //! stops the thread.
 
+pub mod config;
+pub mod deploy;
+pub mod discovery;
 pub mod proto;
 mod session;
 #[cfg(test)]
@@ -28,7 +30,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use iroh::endpoint::{presets, IdleTimeout, QuicTransportConfig};
-use iroh::{Endpoint, RelayMode, Watcher};
+use iroh::{Endpoint, Watcher};
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::oneshot;
@@ -127,6 +129,7 @@ impl std::error::Error for NetError {}
 #[derive(Debug, Clone, Default)]
 pub struct NetConfig {
     pub enabled: bool,
+    pub relay: config::RelayConfig,
     /// Bind one explicit address instead of every interface; tests use
     /// `127.0.0.1:0`.
     pub bind: Option<SocketAddr>,
@@ -163,6 +166,7 @@ struct Inner {
     accepting: AtomicBool,
     closed: AtomicBool,
     cancel: Option<Arc<AtomicBool>>,
+    relay: config::RelayConfig,
     /// Sessions alive on this endpoint; a listener holds one at a time,
     /// so `listen` and `rearm` refuse while it is above zero.
     sessions: std::sync::atomic::AtomicU32,
@@ -275,14 +279,25 @@ impl fmt::Debug for Net {
 }
 
 impl Net {
-    /// Bind an endpoint speaking [`proto::ALPN`]: relays disabled, no
-    /// address lookup, a fresh key.
+    /// Bind an endpoint speaking [`proto::ALPN`]: explicit relay policy,
+    /// no address lookup, a fresh key.
     pub fn new(config: &NetConfig) -> Result<Net, NetError> {
         Net::with_alpn(config, proto::ALPN)
     }
 
     /// The same under another ALPN; tests use it to force a mismatch.
     pub(crate) fn with_alpn(config: &NetConfig, alpn: &[u8]) -> Result<Net, NetError> {
+        Net::build(config, alpn, None)
+    }
+
+    /// An endpoint under `alpn` with a given key, or a fresh one: the
+    /// deploy channel's endpoint carries the installation's development
+    /// key (`deploy`).
+    pub(crate) fn build(
+        config: &NetConfig,
+        alpn: &[u8],
+        secret: Option<iroh::SecretKey>,
+    ) -> Result<Net, NetError> {
         if !config.enabled {
             return Err(NetError::new(Code::Disabled, "networking is not enabled"));
         }
@@ -292,7 +307,7 @@ impl Net {
             .build()
             .map_err(|e| NetError::new(Code::Connect, format!("cannot start runtime: {e}")))?;
         let rt = Arc::new(rt);
-        let endpoint = rt.block_on(bind(config, alpn))?;
+        let endpoint = rt.block_on(bind_with(config, alpn, secret))?;
 
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let driver_rt = rt.clone();
@@ -328,6 +343,7 @@ impl Net {
                 accepting: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
                 cancel: config.cancel.clone(),
+                relay: config.relay.clone(),
                 sessions: std::sync::atomic::AtomicU32::new(0),
             }),
         })
@@ -357,7 +373,7 @@ impl Net {
             }
             *waiting = None;
         }
-        let addr = inner.block_on(direct_addr(&inner.endpoint))??;
+        let addr = inner.block_on(direct_addr(&inner.endpoint, &inner.relay))??;
         let addresses: Vec<SocketAddr> = addr.ip_addrs().copied().collect();
         let ticket = EndpointTicket::new(addr).to_string();
         if !inner.accepting.swap(true, Ordering::SeqCst) {
@@ -401,17 +417,7 @@ impl Net {
 
     /// Parse a ticket into what a connect needs.
     fn join_target(&self, ticket: &str) -> Result<(iroh::EndpointAddr, Endpoint), NetError> {
-        let ticket: EndpointTicket = ticket
-            .trim()
-            .parse()
-            .map_err(|e| NetError::new(Code::Ticket, format!("cannot parse ticket: {e}")))?;
-        let addr = ticket.endpoint_addr().clone();
-        if addr.ip_addrs().next().is_none() {
-            return Err(NetError::new(
-                Code::Ticket,
-                "the ticket carries no direct address",
-            ));
-        }
+        let addr = self.inner.relay.ticket_addr(ticket)?;
         Ok((addr, self.inner.endpoint.clone()))
     }
 
@@ -484,8 +490,19 @@ impl Drop for Joining {
     }
 }
 
-/// The endpoint, configured as `docs/net.md` says: no relay, no lookup.
+/// The endpoint: explicit relay policy, no address lookup.
+#[cfg(test)]
 async fn bind(config: &NetConfig, alpn: &[u8]) -> Result<Endpoint, NetError> {
+    bind_with(config, alpn, None).await
+}
+
+/// [`bind`] with a given key; the deploy endpoint uses it.
+async fn bind_with(
+    config: &NetConfig,
+    alpn: &[u8],
+    secret: Option<iroh::SecretKey>,
+) -> Result<Endpoint, NetError> {
+    config.relay.validate()?;
     let idle = IdleTimeout::try_from(proto::IDLE_TIMEOUT)
         .map_err(|e| NetError::new(Code::Connect, format!("idle timeout: {e}")))?;
     let transport = QuicTransportConfig::builder()
@@ -495,11 +512,16 @@ async fn bind(config: &NetConfig, alpn: &[u8]) -> Result<Endpoint, NetError> {
         .max_concurrent_uni_streams(0u32.into())
         .build();
     let mut builder = Endpoint::builder(presets::Minimal)
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(config.relay.mode()?)
         .clear_address_lookup()
         .alpns(vec![alpn.to_vec()])
         .transport_config(transport);
-    if let Some(addr) = config.bind {
+    if let Some(secret) = secret {
+        builder = builder.secret_key(secret);
+    }
+    if config.relay.only {
+        builder = builder.clear_ip_transports();
+    } else if let Some(addr) = config.bind {
         builder = builder
             .clear_ip_transports()
             .bind_addr(addr)
@@ -513,12 +535,17 @@ async fn bind(config: &NetConfig, alpn: &[u8]) -> Result<Endpoint, NetError> {
 
 /// The endpoint's address once it has at least one direct address, or
 /// `net_no_address` after [`proto::ADDRESS_DEADLINE`].
-async fn direct_addr(endpoint: &Endpoint) -> Result<iroh::EndpointAddr, NetError> {
+async fn direct_addr(
+    endpoint: &Endpoint,
+    relay: &config::RelayConfig,
+) -> Result<iroh::EndpointAddr, NetError> {
     let mut watch = endpoint.watch_addr();
     let deadline = tokio::time::Instant::now() + proto::ADDRESS_DEADLINE;
     loop {
         let addr = watch.get();
-        if addr.ip_addrs().next().is_some() {
+        if (!relay.only && addr.ip_addrs().next().is_some() && relay.url.is_none())
+            || (relay.url.is_some() && addr.relay_urls().next().is_some())
+        {
             return Ok(addr);
         }
         match tokio::time::timeout_at(deadline, watch.updated()).await {
@@ -533,7 +560,7 @@ async fn direct_addr(endpoint: &Endpoint) -> Result<iroh::EndpointAddr, NetError
                 return Err(NetError::new(
                     Code::NoAddress,
                     format!(
-                        "no direct address within {} s",
+                        "no usable address (check relay configuration) within {} s",
                         proto::ADDRESS_DEADLINE.as_secs()
                     ),
                 ))

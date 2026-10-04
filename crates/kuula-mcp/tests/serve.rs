@@ -102,9 +102,10 @@ fn initialize_lists_tools_and_resources() {
             request(5, "resources/read", json!({"uri": "kuula://docs/api.md"})),
             request(6, "nope/method", json!({})),
             "this is not json".to_string(),
+            request(7, "resources/read", json!({"uri": "kuula://docs/songs.md"})),
         ],
     );
-    assert_eq!(replies.len(), 7, "the notification gets no reply");
+    assert_eq!(replies.len(), 8, "the notification gets no reply");
     let r = &replies[0]["result"];
     assert_eq!(r["protocolVersion"], "2025-03-26", "client version echoed");
     assert_eq!(r["serverInfo"]["name"], "kuula-mcp");
@@ -116,6 +117,7 @@ fn initialize_lists_tools_and_resources() {
     assert_eq!(
         names,
         [
+            "net_sim",
             "validate",
             "run",
             "replay",
@@ -125,12 +127,20 @@ fn initialize_lists_tools_and_resources() {
             "state",
             "logs",
             "profile",
-            "stop"
+            "stop",
+            "deploy"
         ]
     );
     let res = replies[3]["result"]["resources"].as_array().unwrap();
-    assert_eq!(res.len(), 2);
-    assert_eq!(res[0]["uri"], "kuula://docs/api.md");
+    let uris: Vec<&str> = res.iter().map(|r| r["uri"].as_str().unwrap()).collect();
+    assert_eq!(
+        uris,
+        [
+            "kuula://docs/api.md",
+            "kuula://docs/skill.md",
+            "kuula://docs/songs.md"
+        ]
+    );
     let text = replies[4]["result"]["contents"][0]["text"]
         .as_str()
         .unwrap();
@@ -138,6 +148,10 @@ fn initialize_lists_tools_and_resources() {
     assert_eq!(replies[5]["error"]["code"], -32601);
     assert_eq!(replies[6]["error"]["code"], -32700);
     assert_eq!(replies[6]["id"], Value::Null);
+    let songs = replies[7]["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(songs.contains("\"omt\": \"0.3\""), "songs.md has a song");
 }
 
 #[test]
@@ -419,7 +433,7 @@ fn bad_arguments_are_tool_errors_and_bad_calls_are_rpc_errors() {
             init(),
             call(2, "run", json!({"cart": "hello", "frames": 1_000_000})),
             call(3, "run", json!({})),
-            call(4, "deploy", json!({})),
+            call(4, "teleport", json!({})),
             call(5, "run", json!({"cart": "hello", "frames": 0})),
             call(
                 6,
@@ -535,4 +549,119 @@ fn record_stop_and_replay_reproduce_the_screen() {
     let v = structured(&replies[6]);
     assert_eq!(v["frame"], 2);
     assert_eq!(v["queued"], 3, "the rest of the transcript waits for step");
+}
+
+/// `talk` with a deploy function, so `deploy` can push.
+fn talk_deploy(root: PathBuf, lines: &[String], deploy: Option<kuula_mcp::DeployFn>) -> Vec<Value> {
+    let mut input = lines.join("\n");
+    input.push('\n');
+    let mut out = Vec::new();
+    kuula_mcp::serve_with(
+        Cursor::new(input.into_bytes()),
+        &mut out,
+        root,
+        None,
+        deploy,
+    )
+    .unwrap();
+    String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("each line is JSON"))
+        .collect()
+}
+
+#[test]
+fn deploy_without_networking_is_a_stable_unavailable_error() {
+    let replies = talk_deploy(
+        examples(),
+        &[
+            init(),
+            call(2, "deploy", json!({"cart": "hello", "to": "endpointabc"})),
+            // The arguments are checked first, so a typo is still a typo.
+            call(3, "deploy", json!({"cart": "hello"})),
+        ],
+        None,
+    );
+    assert_eq!(error_code(&replies[1]), "deploy_unavailable");
+    assert_eq!(error_code(&replies[2]), "invalid_arguments");
+}
+
+#[test]
+fn deploy_resolves_the_cart_under_the_root_and_returns_the_four_results() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Seen = Vec<(String, usize, bool, String)>;
+    let seen: Rc<RefCell<Seen>> = Rc::default();
+    let log = seen.clone();
+    let deploy: kuula_mcp::DeployFn = Rc::new(move |req| {
+        log.borrow_mut().push((
+            req.name.clone(),
+            req.snapshot.len(),
+            req.snapshot.get("main.lua").is_some(),
+            req.to.clone(),
+        ));
+        if req.to == "refused" {
+            return Err(kuula_mcp::ToolError::new("deploy_unpaired", "not approved"));
+        }
+        Ok(kuula_mcp::DeployOutcome {
+            name: req.name,
+            bytes: 1234,
+            digest: "ab".repeat(32),
+            code: "deploy_ok".into(),
+            detail: "a\u{1b}[31mb".into(),
+            transfer: "ok".into(),
+            validation: "ok".into(),
+            install: "ok".into(),
+            restart: "started".into(),
+        })
+    });
+    let scratch = Scratch::new();
+    scratch.cart("my-cart", "function _draw() cls() end");
+    let replies = talk_deploy(
+        scratch.0.clone(),
+        &[
+            init(),
+            call(2, "deploy", json!({"cart": "my-cart", "to": "ticket1"})),
+            call(3, "deploy", json!({"cart": "my-cart", "to": "refused"})),
+            call(4, "deploy", json!({"cart": "..", "to": "t"})),
+            call(5, "deploy", json!({"cart": "nothing-here", "to": "t"})),
+            call(
+                6,
+                "deploy",
+                json!({"cart": "my-cart", "to": "t".repeat(2000)}),
+            ),
+        ],
+        Some(deploy),
+    );
+    let v = structured(&replies[1]);
+    assert_eq!(v["name"], "my-cart");
+    assert_eq!(v["bytes"], 1234);
+    assert_eq!(v["digest"], "ab".repeat(32));
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["code"], "deploy_ok");
+    assert_eq!(
+        [
+            &v["transfer"],
+            &v["validation"],
+            &v["install"],
+            &v["restart"]
+        ],
+        ["ok", "ok", "ok", "started"]
+    );
+    assert!(
+        !v["detail"].as_str().unwrap().contains('\u{1b}'),
+        "the receiver's text is cleaned: {}",
+        v["detail"]
+    );
+    assert_eq!(error_code(&replies[2]), "deploy_unpaired");
+    assert_eq!(error_code(&replies[3]), "path_outside_root");
+    assert_eq!(error_code(&replies[4]), "cart_not_found");
+    assert_eq!(error_code(&replies[5]), "invalid_arguments");
+    // Only the two well-formed calls reached the function, and each saw
+    // the cart as the other tools do.
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0], ("my-cart".into(), 1, true, "ticket1".into()));
 }

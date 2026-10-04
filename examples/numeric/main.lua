@@ -1,7 +1,7 @@
 -- Kuula example: the numeric profile probe.
 --
--- Prints, through the log, the same lines the Wasm gate's numeric probe
--- prints (tools/wasm-gate/host/src/main.rs, NUMERIC and NAN): for ten
+-- Prints, through the log, the lines of a numeric probe that every host
+-- this console is built for must print the same way: for ten
 -- thousand arguments the routed math functions, the float operators,
 -- formatting and integer arithmetic, then the special values and the NaN
 -- spelling. The output must be identical on every supported host; its

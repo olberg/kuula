@@ -1,4 +1,5 @@
 [cart]
+license = "MIT"
 title = "Alien Invaders"
 screen_mode = "640x480"
 

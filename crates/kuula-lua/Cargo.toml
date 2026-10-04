@@ -10,3 +10,7 @@ kuula-core.workspace = true
 mlua.workspace = true
 # Pinned: the numeric profile is this crate's code.
 libm = "=0.2.16"
+
+[dev-dependencies]
+# Songs for the audio tests, written by the engine's own container writer.
+omt-engine.workspace = true

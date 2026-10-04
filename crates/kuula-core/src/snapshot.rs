@@ -54,7 +54,7 @@ pub fn is_served(name: &str) -> bool {
                 .strip_prefix("sfx/")
                 .or_else(|| name.strip_prefix("music/"))
             {
-                rest.ends_with(".trk") && !rest.contains('/')
+                rest.ends_with(".omc") && !rest.contains('/')
             } else if let Some(rest) = name.strip_prefix("samples/") {
                 rest.ends_with(".wav") && !rest.contains('/')
             } else {
@@ -358,8 +358,8 @@ mod tests {
             "src/deep/b.lua",
             "gfx/tiles.png",
             "map/level.json",
-            "sfx/hit.trk",
-            "music/song.trk",
+            "sfx/hit.omc",
+            "music/song.omc",
             "samples/kick.wav",
         ] {
             assert!(is_served(good), "{good}");
@@ -370,6 +370,7 @@ mod tests {
             "gfx/x.jpg",
             "map/x.txt",
             "sfx/x.wav",
+            "music/x.wav",
             "samples/sub/x.wav",
             "src/x.txt",
             "other/main.lua",

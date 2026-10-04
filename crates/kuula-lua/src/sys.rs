@@ -2,6 +2,8 @@
 //! Every function reads or writes the [`SysState`] in the shell's draw
 //! state; a cart guest has no `SysState` and no `sys` global.
 
+mod network;
+
 use kuula_core::shell::{SysRequest, SysState};
 use kuula_core::Category;
 use mlua::{Error, Lua, Result, Value};
@@ -36,6 +38,9 @@ pub(crate) fn install(reg: &mut Reg<'_>) -> Result<()> {
             let t = lua.create_table()?;
             t.set("name", c.name.as_str())?;
             t.set("title", c.title.as_str())?;
+            t.set("network", c.network)?;
+            t.set("author", c.author.as_str())?;
+            t.set("license", c.license.as_ref().map(ToString::to_string))?;
             out.set(i + 1, t)?;
         }
         Ok(out)
@@ -50,6 +55,9 @@ pub(crate) fn install(reg: &mut Reg<'_>) -> Result<()> {
     })?;
     reg.function(&IS_PAUSED, |lua, ()| with_sys(lua, |s| s.paused))?;
     reg.function(&RUNNING, |lua, ()| with_sys(lua, |s| s.running))?;
+    reg.function(&HOST_STARTED, |lua, ()| {
+        with_sys(lua, |s| std::mem::take(&mut s.host_started))
+    })?;
     reg.function(&MENU, |lua, ()| with_sys(lua, |s| s.menu_pressed))?;
     reg.function(&FAULT, |lua, ()| {
         let fault = with_sys(lua, |s| s.fault.clone())?;
@@ -91,6 +99,7 @@ pub(crate) fn install(reg: &mut Reg<'_>) -> Result<()> {
         }
         request(lua, SysRequest::SetVolume(v as u32))
     })?;
+    network::install(reg)?;
     Ok(())
 }
 
@@ -100,7 +109,7 @@ binding!(CARTS {
     group: Group::Shell,
     sigs: &[Sig::new(
         "sys.carts()",
-        "a list of `{name, title}` tables, one per installed cart",
+        "a list of `{name, title, author, license, network}` tables; license is display text or nil",
     )],
     price: Price::One,
 });
@@ -162,6 +171,17 @@ binding!(RUNNING {
     scope: Scope::Sys,
     group: Group::Shell,
     sigs: &[Sig::new("sys.running()", "whether a cart is running")],
+    price: Price::One,
+});
+
+binding!(HOST_STARTED {
+    name: "host_started",
+    scope: Scope::Sys,
+    group: Group::Shell,
+    sigs: &[Sig::new(
+        "sys.host_started()",
+        "whether the host started a cart itself since the last call",
+    )],
     price: Price::One,
 });
 

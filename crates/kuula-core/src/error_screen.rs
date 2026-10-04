@@ -10,7 +10,7 @@
 use crate::blit;
 use crate::buf::Rect;
 use crate::fault::Fault;
-use crate::font::{GLYPH_HEIGHT, GLYPH_WIDTH};
+use crate::font::CELL_WIDTH;
 use crate::pen::{Colour, Pen};
 use crate::raster::{self, Surface};
 use crate::resources::BufId;
@@ -103,9 +103,10 @@ pub fn compose(pixels: &mut [u8], width: u32, height: u32, fault: &Fault) {
         touched: 0,
     };
     let pen = Pen::new(BufId::SCREEN, width, height);
-    let columns = ((w - 4 * MARGIN) / GLYPH_WIDTH).max(8) as usize;
+    let line_h = pen.font.height();
+    let columns = ((w - 4 * MARGIN) / CELL_WIDTH).max(8) as usize;
     let text = lines(fault, columns);
-    let text_h = text.len() as i32 * GLYPH_HEIGHT;
+    let text_h = text.len() as i32 * line_h;
     let panel = Rect::new(
         MARGIN,
         ((h - text_h) / 2 - MARGIN).max(0),
@@ -133,7 +134,7 @@ pub fn compose(pixels: &mut [u8], width: u32, height: u32, fault: &Fault) {
     let mut y = panel.y + MARGIN;
     for (line, colour) in &text {
         blit::print(&mut s, &pen, line, panel.x + MARGIN, y, *colour);
-        y += GLYPH_HEIGHT;
+        y += line_h;
     }
 }
 
