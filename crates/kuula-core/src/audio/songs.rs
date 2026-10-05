@@ -1,13 +1,14 @@
 //! Songs: loading `sfx/<name>.omc` and `music/<name>.omc`. A file is taken
 //! only after its bounds hold before anything is allocated, the OMT
 //! validator reports no error and the `kuula` profile is kept; the result
-//! is a shared [`Song`] the mixer plays. The bank keeps the loaded songs by
-//! path and counts the song budget.
+//! is a shared [`Song`] the mixer plays. The bank keeps the loaded songs
+//! and the cue banks ([`super::cues`]) by path and counts the song budget.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use omt_engine::omc;
+use omt_engine::omq::Bank;
 use omt_engine::song::{self, Diag, Song};
 use serde_json::Value;
 
@@ -38,10 +39,11 @@ pub struct LoadedSong {
     pub sample_bytes: usize,
 }
 
-/// The cart's loaded songs by path, within [`SONG_BUDGET`].
+/// The cart's loaded songs and cue banks by path, within [`SONG_BUDGET`].
 #[derive(Default)]
 pub struct SongBank {
     songs: HashMap<String, PlayableSong>,
+    cues: HashMap<String, Arc<Bank>>,
     used: usize,
 }
 
@@ -66,16 +68,27 @@ impl SongBank {
         self.songs.insert(path.to_string(), song.playable.clone());
         song.playable.clone()
     }
+
+    pub fn cues(&self, path: &str) -> Option<Arc<Bank>> {
+        self.cues.get(path).cloned()
+    }
+
+    /// Keep a cue bank that [`super::cues::load`] accepted against the
+    /// room it was given; `bytes` is its inflated payload.
+    pub fn insert_cues(&mut self, path: &str, bank: &Arc<Bank>, bytes: usize) {
+        self.used += bytes;
+        self.cues.insert(path.to_string(), bank.clone());
+    }
 }
 
-fn song_error(path: &str, why: impl Into<String>) -> AudioError {
+pub(super) fn song_error(path: &str, why: impl Into<String>) -> AudioError {
     AudioError::Song {
         path: path.to_string(),
         why: why.into(),
     }
 }
 
-fn sample_error(path: &str, why: impl Into<String>) -> AudioError {
+pub(super) fn sample_error(path: &str, why: impl Into<String>) -> AudioError {
     AudioError::Sample {
         path: path.to_string(),
         why: why.into(),
@@ -84,7 +97,7 @@ fn sample_error(path: &str, why: impl Into<String>) -> AudioError {
 
 /// `<code> at <path>`, or the code alone for a diagnostic about the whole
 /// song.
-fn describe(d: &Diag) -> String {
+pub(super) fn describe(d: &Diag) -> String {
     if d.path.is_empty() {
         d.code.clone()
     } else {
@@ -105,7 +118,7 @@ fn count(v: Option<&Value>) -> u64 {
 /// The bytes a payload's sample records declare, 2 per sample frame, read
 /// without decoding anything. A payload that is not JSON, or has no
 /// records, declares none: the validator reports the damage.
-fn declared_sample_bytes(payload: &[u8]) -> u64 {
+pub(super) fn declared_sample_bytes(payload: &[u8]) -> u64 {
     let Ok(Value::Object(root)) = serde_json::from_slice::<Value>(payload) else {
         return 0;
     };
@@ -122,21 +135,17 @@ fn declared_sample_bytes(payload: &[u8]) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
-/// Read the OMC `file` at `path` as a song, given the room the two budgets
-/// have left. Nothing is kept: the caller charges the result to the bank
-/// and the sample bank, so a refused load changes nothing.
-pub fn load(
+/// The chunks of the OMC `file` at `path`, once the bounds hold on the
+/// ones that could hold a song or a bank, taken together, before the
+/// manifest is trusted to say which one plays. Each chunk gets what the
+/// ones before it left of the room, so a load inflates at most
+/// `song_room` bytes however many chunks the file has.
+pub(super) fn bounded_chunks<'a>(
     path: &str,
-    file: &[u8],
+    file: &'a [u8],
     song_room: usize,
-    sample_room: usize,
-) -> Result<LoadedSong, AudioError> {
+) -> Result<Vec<omc::Chunk<'a>>, AudioError> {
     let chunks = omc::chunks(file).map_err(|e| song_error(path, e))?;
-
-    // The bounds, on the chunks that could hold a song taken together,
-    // before the manifest is trusted to say which one plays. Each chunk
-    // gets what the ones before it left of the room, so a load inflates
-    // at most `song_room` bytes however many chunks the file has.
     let first = &chunks[0];
     if &first.kind == b"JSON" && first.data.is_some_and(|d| d.len() > MANIFEST_LIMIT) {
         return Err(song_error(path, "the manifest is larger than 1 MiB"));
@@ -170,7 +179,19 @@ pub fn load(
         };
         left -= size;
     }
+    Ok(chunks)
+}
 
+/// Read the OMC `file` at `path` as a song, given the room the two budgets
+/// have left. Nothing is kept: the caller charges the result to the bank
+/// and the sample bank, so a refused load changes nothing.
+pub fn load(
+    path: &str,
+    file: &[u8],
+    song_room: usize,
+    sample_room: usize,
+) -> Result<LoadedSong, AudioError> {
+    bounded_chunks(path, file, song_room)?;
     let entry = omc::read_song(file).map_err(|e| song_error(path, e))?;
 
     // What the sample records declare must fit before the validator

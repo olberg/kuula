@@ -1,0 +1,6 @@
+{
+"label":"Kuula Dev",
+"icon":"/mnt/SDCARD/App/KuulaDev/icon.png",
+"launch":"launch.sh",
+"description":"Receive carts from your computer"
+}

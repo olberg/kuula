@@ -223,16 +223,21 @@ fn join(
     Ok(0)
 }
 
-/// Print the peer, send the greeting, measure one ping.
+/// Print the peer, measure one ping, send the greeting. The ping goes
+/// first: a peer that leaves once it has heard the greeting (`join
+/// --say`) would otherwise be free to go before the ping is answered,
+/// and this side would end with an error for a session that went well.
 fn greet(mut session: Session, name: &str) -> Result<Session, NetError> {
     say(format!(
         "peer: {} ({})",
         session.peer_id(),
         session.peer_runtime()
     ));
-    let opened = session
-        .send_text(&format!("hello from {name}"))
-        .and_then(|()| session.ping());
+    let opened = session.ping().and_then(|rtt| {
+        session
+            .send_text(&format!("hello from {name}"))
+            .map(|()| rtt)
+    });
     match opened {
         Ok(rtt) => {
             say(format!("path: {}", session.path()));

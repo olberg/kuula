@@ -5,7 +5,7 @@
 use kuula_core::audio::sample::encode_wav;
 use kuula_core::audio::{OUTPUT_CHANNELS, SAMPLES_PER_FRAME, VALUES_PER_FRAME};
 use kuula_core::{Console, FrameInput};
-use omt_engine::omc::{write_song, ResourceOut};
+use omt_engine::omc::{write_bank, write_song, ResourceOut};
 
 use super::{cart, run};
 use crate::LuaGuest;
@@ -89,6 +89,31 @@ fn broken() -> Vec<u8> {
     )
 }
 
+/// One channel, two versions that loop over rows of the same length: `low`
+/// holds a note, `high` plays one an octave up.
+fn versions() -> Vec<u8> {
+    let json = r#"{"omt":"0.3","profile":"kuula","rate":44100,"tick":[1,60],
+        "channels":[{}],
+        "instruments":[{"number":1,"volume":16,"engine":{"kind":"wave","waveform":"pulse"}}],
+        "tracks":[{"rows":4,"speed":2,"cells":[[0,"C-4 01"],[2,"C-4"]]},
+                  {"rows":4,"speed":2,"cells":[[0,"C-5 01"],[1,"C-5"],[2,"C-5"],[3,"C-5"]]}],
+        "arrangements":[{"name":"low","orders":[{"tracks":[0],"ticks":8,"next":0}]},
+                        {"name":"high","orders":[{"tracks":[1],"ticks":8,"next":0}]}]}"#;
+    write_song(json.as_bytes(), &[], None, "kuula tests")
+}
+
+/// A bank of cues over the pulse note the songs use: `hit` on one track,
+/// with a range to vary its pitch in, `pair` on two, and `hum`, looping.
+fn bank() -> Vec<u8> {
+    let json = r#"{"omq":"0.2","rate":44100,"tick":[1,60],
+        "instruments":[{"number":1,"volume":16,"engine":{"kind":"wave","waveform":"pulse"}}],
+        "tracks":[{"rows":1,"speed":4,"cells":[[0,"C-5 01"]]}],
+        "cues":[{"name":"hit","tracks":[0],"vary":{"transpose":[-256,256]}},
+                {"name":"pair","tracks":[0,0]},
+                {"name":"hum","tracks":[0],"loop":true}]}"#;
+    write_bank(json.as_bytes(), &[], &[], None, "kuula tests")
+}
+
 fn console_with(src: &str) -> Console {
     let tick = encode_wav(22050, 8, 1, &[255, 0, 255, 0, 255, 0, 255, 0]);
     let (blip, tune, wide, stereo, huge, broken) =
@@ -104,6 +129,8 @@ fn console_with(src: &str) -> Console {
             ("samples/stereo.wav", &encode_wav(44100, 16, 2, &[0; 8])),
             ("sfx/needs.omc", &stereo),
             ("sfx/huge.omc", &huge),
+            ("cues/fx.omc", &bank()),
+            ("music/two.omc", &versions()),
         ]),
         LuaGuest::factory,
     )
@@ -200,6 +227,168 @@ fn every_call_returns_and_the_errors_keep_their_codes() {
 }
 
 #[test]
+fn cues_are_triggered_by_name_and_stopped_by_channel() {
+    let mut c = console_with(
+        "assert(cue('fx', 'hit') == 7)\n\
+         assert(cue('fx', 'pair') == 5)\n\
+         assert(cue('fx', 'hit', 12) == 4)\n\
+         assert(cue('fx', 'hit', nil, 0.5) == 3)\n\
+         assert(cue('fx', 'hit', nil, nil, 0) == 0)\n\
+         h = cue('fx', 'hum')\n\
+         assert(h == 2, h)\n\
+         stop(h)\n\
+         stop(0, true)\n\
+         stop(1)\n\
+         function _draw() end",
+    );
+    run(&mut c, 2);
+    assert_eq!(c.state().fault(), None, "{:?}", c.state());
+
+    let fault = |src: &str| {
+        let mut c = console_with(src);
+        run(&mut c, 1);
+        let f = c.state().fault().cloned().expect("faulted");
+        (f.code, f.message)
+    };
+    let (code, message) = fault("cue('fx', 'zap')");
+    assert_eq!(code, "cue_not_found");
+    assert!(
+        message.contains("cues/fx.omc has no cue \"zap\""),
+        "{message}"
+    );
+    assert_eq!(fault("cue('nope', 'hit')").0, "asset_not_found");
+    assert_eq!(fault("cue('fx', 'hit', 0, 1, 8)").0, "audio_bad_channel");
+    let (code, message) = fault("cue('fx', 'pair', nil, nil, 7)");
+    assert_eq!(code, "audio_no_room");
+    assert!(message.contains("cue \"pair\" has 2 channels"), "{message}");
+    // A bank's name is an asset name, as a song's is.
+    let (code, message) = fault("cue('../sfx/blip', 'hit')");
+    assert_eq!(code, "asset_invalid", "{message}");
+    assert_eq!(fault("stop(8)").0, "audio_bad_channel");
+
+    // What the arguments do is heard: an octave up is another sound, half
+    // the gain half the level, and a looping cue sounds until it is stopped.
+    let frame = |body: &str, frames: usize| {
+        let mut c = console_with(&format!("function _init() {body} end"));
+        run(&mut c, frames);
+        assert_eq!(c.state().fault(), None, "{:?}", c.state());
+        (c.output().audio.to_vec(), peak(&c))
+    };
+    let written = frame("cue('fx', 'hit', 0)", 2);
+    assert_ne!(frame("cue('fx', 'hit', 12)", 2).0, written.0);
+    assert_eq!(frame("cue('fx', 'hit', 0, 1)", 2), written);
+    let half = frame("cue('fx', 'hit', 0, 0.5)", 2).1;
+    assert_eq!(
+        half,
+        ((written.1 * 128) >> 8).max(((-written.1 * 128) >> 8).abs())
+    );
+    // Varied by the console: not as written, and the same every run.
+    let varied = frame("cue('fx', 'hit')", 2);
+    assert_ne!(varied.0, written.0);
+    assert_eq!(frame("cue('fx', 'hit')", 2), varied);
+    assert!(frame("cue('fx', 'hum')", 30).1 > 0);
+    assert_eq!(frame("stop(cue('fx', 'hum'))", 2).1, 0);
+}
+
+#[test]
+fn music_names_a_version_and_switches_to_it_where_it_is() {
+    let frames_of = |init: &str, at: usize, then: &str, frames: usize| {
+        let mut c = console_with(&format!(
+            "n = 0\n\
+             function _init() {init} end\n\
+             function _update() n = n + 1; if n == {at} then {then} end end"
+        ));
+        let pcm = hash_of(&mut c, frames);
+        assert_eq!(c.state().fault(), None, "{:?}", c.state());
+        pcm
+    };
+    let low = frames_of("music('two')", 0, "", 12);
+    let high = frames_of("music('two', 0, 'high')", 0, "", 12);
+    assert_ne!(low, high);
+    assert_eq!(frames_of("music('two', 0, 'low')", 0, "", 12), low);
+    assert_eq!(frames_of("music('two', 0, 1)", 0, "", 12), high);
+    assert_eq!(frames_of("music('two', 0, 0.0)", 0, "", 12), low);
+
+    // A switch in the fifth update is neither version from the top, and
+    // naming the version that plays is no switch at all.
+    let switched = frames_of("music('two')", 5, "music('two', 0, 'high')", 12);
+    assert_ne!(switched, low);
+    assert_ne!(switched, high);
+    assert_eq!(
+        frames_of("music('two')", 5, "music('two', 0, 'low')", 12),
+        low
+    );
+
+    let fault = |src: &str| {
+        let mut c = console_with(src);
+        run(&mut c, 1);
+        let f = c.state().fault().cloned().expect("faulted");
+        (f.code, f.message)
+    };
+    let (code, message) = fault("music('two', 0, 'nope')");
+    assert_eq!(code, "version_not_found");
+    assert!(
+        message.contains("music/two.omc has no version \"nope\""),
+        "{message}"
+    );
+    assert_eq!(fault("music('two', 0, 2)").0, "version_not_found");
+    let (code, message) = fault("music('two', 0, {})");
+    assert_eq!(code, "runtime_error", "{message}");
+    assert!(
+        message.contains("version is a name or a number"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_music_keeps_its_channels_until_the_cart_lets_some_go() {
+    // The song has two channels. Six effects fill the other six; the
+    // seventh cuts the oldest of them and leaves the music whole.
+    let mut c = console_with(
+        "music('song')\n\
+         for i = 1, 6 do assert(sfx('blip') == 8 - i) end\n\
+         assert(sfx('blip') == 7)\n\
+         music_channels(1)\n\
+         assert(sfx('blip') == 1)\n\
+         assert(sfx('blip') == 6)\n\
+         music_channels(0)\n\
+         assert(sfx('blip') == 0)\n\
+         music_channels(99)\n\
+         music_channels(-1)\n\
+         music_channels()\n\
+         function _draw() end",
+    );
+    run(&mut c, 2);
+    assert_eq!(c.state().fault(), None, "{:?}", c.state());
+
+    // A sound put on a channel by name is not cut by the ones that follow.
+    let mut c = console_with(
+        "sample('tick', 7)\n\
+         for i = 1, 7 do assert(sfx('blip') == 7 - i) end\n\
+         assert(sfx('blip') == 6)\n\
+         function _draw() end",
+    );
+    run(&mut c, 2);
+    assert_eq!(c.state().fault(), None, "{:?}", c.state());
+
+    // With one on every channel the music leaves, a sound that names none
+    // is not played: the call returns nil, and the cart goes on.
+    let mut c = console_with(
+        "music('song')\n\
+         for ch = 2, 7 do sfx('blip', ch) end\n\
+         assert(sfx('blip') == nil)\n\
+         assert(sample('tick') == nil)\n\
+         assert(cue('fx', 'hit') == nil)\n\
+         stop(7, true)\n\
+         assert(cue('fx', 'pair') == nil)\n\
+         assert(sfx('blip') == 7)\n\
+         function _draw() end",
+    );
+    run(&mut c, 2);
+    assert_eq!(c.state().fault(), None, "{:?}", c.state());
+}
+
+#[test]
 fn a_cart_hears_stereo() {
     let mut c = console_with("function _init() music('song') end");
     run(&mut c, 2);
@@ -255,7 +444,7 @@ fn a_fault_silences_the_cart() {
 
 #[test]
 fn the_calls_cost_one_cycle_each() {
-    // Four audio calls: four cycles of API on top of whatever the frame
+    // Seven audio calls: seven cycles of API on top of whatever the frame
     // otherwise spends, measured against a control.
     let measure = |body: &str| {
         let mut c = console_with(&format!(
@@ -267,6 +456,9 @@ fn the_calls_cost_one_cycle_each() {
         c.output().profile.cycles[kuula_core::Category::Api as usize]
     };
     let base = measure("");
-    let with = measure("sfx('blip', 0) music('song') sample('tick') volume(0, 1)");
-    assert_eq!(with - base, 4, "{base} -> {with}");
+    let with = measure(
+        "sfx('blip', 0) music('song') sample('tick') volume(0, 1) cue('fx', 'hit') stop(7) \
+         music_channels(4)",
+    );
+    assert_eq!(with - base, 7, "{base} -> {with}");
 }

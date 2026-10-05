@@ -5,6 +5,9 @@ members = [
     "crates/kuula-lua",
     "crates/kuula-host-sdl",
     "crates/kuula-host-headless",
+    "crates/kuula-host-common",
+    "crates/kuula-touch",
+    "crates/kuula-android",
     "crates/kuula-cli",
     "crates/kuula-mcp",
     "crates/kuula-net",
@@ -16,7 +19,7 @@ members = [
 exclude = ["crates/vendor/omt-engine"]
 
 [workspace.package]
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Olli Sikstus"]
@@ -26,6 +29,8 @@ kuula-core = { path = "crates/kuula-core" }
 kuula-lua = { path = "crates/kuula-lua" }
 kuula-host-sdl = { path = "crates/kuula-host-sdl" }
 kuula-host-headless = { path = "crates/kuula-host-headless" }
+kuula-host-common = { path = "crates/kuula-host-common" }
+kuula-touch = { path = "crates/kuula-touch" }
 kuula-mcp = { path = "crates/kuula-mcp" }
 omt-engine = { path = "crates/vendor/omt-engine" }
 mlua = { version = "0.12", features = ["lua55", "vendored"] }
@@ -41,7 +46,7 @@ toml = { version = "1", default-features = false, features = ["parse", "serde"] 
 # backend, which png already pulls in. No encryption, no other codecs.
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
 
-# A copy of mlua-sys 0.12.0 with one change: `luaL_makeseed` always takes
+# A copy of mlua-sys 0.13.0 with one change: `luaL_makeseed` always takes
 # the C path, so the string-hash seed pinned in `.cargo/config.toml` holds
 # on Linux and macOS too (the stock crate seeds those from the OS RNG).
 # See crates/vendor/mlua-sys/src/lua55/lauxlib.rs.

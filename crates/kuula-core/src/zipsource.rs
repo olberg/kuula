@@ -184,6 +184,16 @@ pub fn pack(snapshot: &crate::snapshot::Snapshot) -> Result<Vec<u8>, SourceError
         .map_err(|e| zip_error("", e))
 }
 
+/// The digest a packed cart is known by: SHA-256 of its bytes, lower-case
+/// hex. It says which bytes arrived, not who made them.
+pub fn digest_hex(package: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(package)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 impl CartSource for ZipSource {
     fn read(&self, path: &str) -> Result<Vec<u8>, SourceError> {
         let Some(entry) = self.entries.get(path) else {
@@ -230,6 +240,18 @@ mod tests {
     use zip::ZipWriter;
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    #[test]
+    fn a_digest_is_sha256_in_lower_case_hex() {
+        assert_eq!(
+            digest_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            digest_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 
     struct TempDir(PathBuf);
 

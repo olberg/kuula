@@ -58,10 +58,10 @@ fn a_file_that_is_not_a_song_is_a_song_error() {
         refused(b"not a container"),
         "song_error: sfx/hit.omc: not an OMC file"
     );
-    // A container of another version than the one read, 0.7.
-    for (version, text) in [([1, 0, 0, 0], "1.0"), ([0, 0, 8, 0], "0.8")] {
+    // A container of another version than the one read, 0.8.
+    for (version, text) in [([1, 0, 0, 0], "1.0"), ([0, 0, 7, 0], "0.7")] {
         let mut f = omc(&Song::new(1));
-        assert_eq!(f[4..8], [0, 0, 7, 0]);
+        assert_eq!(f[4..8], [0, 0, 8, 0]);
         f[4..8].copy_from_slice(&version);
         assert_eq!(
             refused(&f),
@@ -260,11 +260,11 @@ fn a_refused_file_is_refused_for_good_and_read_once() {
     });
     let mut d = DrawState::new(8, 8, source.clone() as Rc<dyn CartSource>);
 
-    let first = d.music(Some("bad"), 0).unwrap_err();
+    let first = d.music(Some("bad"), 0, None).unwrap_err();
     assert_eq!(first.code(), "song_error");
     assert_eq!(source.reads.get(), 1);
     for _ in 0..3 {
-        assert_eq!(d.music(Some("bad"), 0).unwrap_err(), first);
+        assert_eq!(d.music(Some("bad"), 0, None).unwrap_err(), first);
     }
     assert_eq!(source.reads.get(), 1, "the song is not read again");
     assert_eq!(d.audio.songs().used(), 0);
@@ -279,7 +279,7 @@ fn a_refused_file_is_refused_for_good_and_read_once() {
     // A name with no file keeps nothing, and what loads still loads.
     for _ in 0..2 {
         assert_eq!(
-            d.music(Some("nope"), 0).unwrap_err().code(),
+            d.music(Some("nope"), 0, None).unwrap_err().code(),
             "asset_not_found"
         );
     }
@@ -393,7 +393,7 @@ fn the_sample_budget_is_shared_by_wav_files_and_songs() {
         ("samples/big.wav", wav(1 << 20)),
         ("samples/fits.wav", wav(600_000)),
     ]);
-    d.music(Some("a"), 0).unwrap();
+    d.music(Some("a"), 0, None).unwrap();
     assert_eq!(d.audio.samples().used(), 1_400_000);
     let song_used = d.audio.songs().used();
 
@@ -402,7 +402,7 @@ fn the_sample_budget_is_shared_by_wav_files_and_songs() {
     assert_eq!(e.code(), "sample_error");
     assert_eq!(d.audio.samples().used(), 1_400_000);
     // Nor does a second song's 800 000 bytes of records.
-    let e = d.music(Some("b"), 0).unwrap_err();
+    let e = d.music(Some("b"), 0, None).unwrap_err();
     assert_eq!(e.code(), "sample_error");
     assert_eq!(d.audio.samples().used(), 1_400_000);
     assert_eq!(d.audio.songs().used(), song_used);
@@ -417,7 +417,7 @@ fn the_sample_budget_is_shared_by_wav_files_and_songs() {
         ("samples/big.wav", wav(SAMPLE_BUDGET - 700_000)),
     ]);
     d.sample("big", None, 1 << 16).unwrap();
-    let e = d.music(Some("b"), 0).unwrap_err();
+    let e = d.music(Some("b"), 0, None).unwrap_err();
     assert_eq!(e.code(), "sample_error");
     assert_eq!(d.audio.samples().used(), SAMPLE_BUDGET - 700_000);
     assert_eq!(d.audio.songs().used(), 0);

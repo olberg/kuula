@@ -4,7 +4,7 @@
 
 mod network;
 
-use kuula_core::shell::{SysRequest, SysState};
+use kuula_core::shell::{DevAction, SysRequest, SysState};
 use kuula_core::Category;
 use mlua::{Error, Lua, Result, Value};
 
@@ -57,6 +57,34 @@ pub(crate) fn install(reg: &mut Reg<'_>) -> Result<()> {
     reg.function(&RUNNING, |lua, ()| with_sys(lua, |s| s.running))?;
     reg.function(&HOST_STARTED, |lua, ()| {
         with_sys(lua, |s| std::mem::take(&mut s.host_started))
+    })?;
+    reg.function(&SINGLE, |lua, ()| with_sys(lua, |s| s.single))?;
+    reg.function(&EXIT, |lua, ()| request(lua, SysRequest::Exit))?;
+    reg.function(&DEV_STATE, |lua, ()| {
+        with_sys(lua, |s| match (s.dev.active, s.dev.pending.is_empty()) {
+            (false, _) => 0,
+            (true, true) => 1,
+            (true, false) => 2,
+        })
+    })?;
+    reg.function(&DEV, |lua, ()| {
+        let dev = with_sys(lua, |s| s.dev.clone())?;
+        let t = lua.create_table()?;
+        t.set("active", dev.active)?;
+        t.set("pending", dev.pending)?;
+        t.set("cart", dev.cart)?;
+        t.set("bytes", dev.bytes)?;
+        t.set("from", dev.from)?;
+        t.set("note", dev.note)?;
+        Ok(t)
+    })?;
+    reg.function(&DEV_ACTION, |lua, action: String| {
+        let answer = match action.as_str() {
+            "approve" => DevAction::Approve,
+            "refuse" => DevAction::Refuse,
+            _ => return Err(Error::runtime("dev_action is \"approve\" or \"refuse\"")),
+        };
+        request(lua, SysRequest::Dev(answer))
     })?;
     reg.function(&MENU, |lua, ()| with_sys(lua, |s| s.menu_pressed))?;
     reg.function(&FAULT, |lua, ()| {
@@ -183,6 +211,68 @@ binding!(HOST_STARTED {
         "whether the host started a cart itself since the last call",
     )],
     price: Price::One,
+});
+
+binding!(SINGLE {
+    name: "single",
+    scope: Scope::Sys,
+    group: Group::Shell,
+    sigs: &[Sig::new(
+        "sys.single()",
+        "whether the shell was started on one cart",
+    )],
+    price: Price::One,
+    doc: "Such a shell opens the first cart of its list at once and calls \
+          `sys.exit()` where it would have shown the list.",
+});
+
+binding!(EXIT {
+    name: "exit",
+    scope: Scope::Sys,
+    group: Group::Shell,
+    sigs: &[Sig::new("sys.exit()", "nothing; asks the host to end")],
+    price: Price::One,
+});
+
+binding!(DEV_STATE {
+    name: "dev_state",
+    scope: Scope::Sys,
+    group: Group::Shell,
+    sigs: &[Sig::new(
+        "sys.dev_state()",
+        "0 with no development receiver, 1 with one, 2 while a developer waits for an answer",
+    )],
+    price: Price::One,
+    doc: "A number, so that asking every frame makes no table; `sys.dev()` \
+          has the details.",
+});
+
+binding!(DEV {
+    name: "dev",
+    scope: Scope::Sys,
+    group: Group::Shell,
+    sigs: &[Sig::new(
+        "sys.dev()",
+        "the development receiver as `{active, pending, cart, bytes, from, note}`",
+    )],
+    price: Price::One,
+    doc: "`pending` is the endpoint id of a developer the receiver refused \
+          because nobody has approved it, or an empty string; `cart`, \
+          `bytes` and `from` are what it offered to send and the address \
+          it came from. All of it is the sender's claim until the person \
+          holding the device approves it.",
+});
+
+binding!(DEV_ACTION {
+    name: "dev_action",
+    scope: Scope::Sys,
+    group: Group::Shell,
+    sigs: &[Sig::new(
+        "sys.dev_action(answer)",
+        "nothing; `\"approve\"` or `\"refuse\"` the pending developer",
+    )],
+    price: Price::One,
+    doc: "Only after a player action. Another answer is a Lua error.",
 });
 
 binding!(MENU {

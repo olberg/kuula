@@ -1,13 +1,17 @@
 //! The Open Module Track engine (docs/omt.md): loads and validates OMT songs and renders them
-//! exactly. One production engine, shared by the tracker and Kuula (the draft's decision 16).
+//! exactly; and plays the banks of Open Module Cues (docs/omq.md), which are OMT's instruments,
+//! tracks and arithmetic under cues. One production engine, shared by the tracker and Kuula (the
+//! draft's decision 16).
 
 pub mod cell;
 pub mod flac;
 pub mod ogg;
 pub mod omc;
+pub mod omq;
 pub mod player;
 pub mod song;
 pub mod tables;
+pub mod wave;
 
 pub use player::{render, Event, EventKind, Mode, Player, Rendering};
 pub use song::{load, Diag, Loaded, Song};
@@ -17,6 +21,13 @@ pub use song::{load, Diag, Loaded, Song};
 pub fn load_omc(file: &[u8]) -> Result<(Loaded, usize), String> {
     let entry = omc::read_song(file)?;
     Ok((load(&entry.payload, &entry.resources), entry.subsong))
+}
+
+/// Loads the bank of an OMC file (OMQ), with its diagnostics and the cue its `subsong` selects.
+/// `Err` when the file has no `omq` song entry to read.
+pub fn load_omc_bank(file: &[u8]) -> Result<(omq::Loaded, usize), String> {
+    let entry = omc::read_bank(file)?;
+    Ok((omq::load(&entry.song.payload, &entry.song.resources, Some(&entry.audio)), entry.song.subsong))
 }
 
 /// SHA-256 of bytes, in lowercase hexadecimal.

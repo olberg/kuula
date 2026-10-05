@@ -6,6 +6,7 @@ use crate::api::{Group, Price, Scope, Sig};
 use crate::bufs::BufHandle;
 use crate::meter::charge;
 use kuula_core::meter::price;
+use kuula_core::tline::{to_fixed, Texture};
 use kuula_core::Category;
 use mlua::{Result, UserDataRef};
 
@@ -32,6 +33,23 @@ type SsprArgs = (
     Option<f64>,
     Option<bool>,
     Option<bool>,
+);
+
+/// `tline(x0, y0, x1, y1, u, v, du, dv, [sx, sy, sw, sh, thick])`.
+type TlineArgs = (
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
 );
 
 /// `map(m, cx, cy, sx, sy, cw, ch, [layer])`.
@@ -82,6 +100,28 @@ pub(super) fn install(reg: &mut Reg<'_>) -> Result<()> {
                     coord(dh.unwrap_or(sh)),
                     fx.unwrap_or(false),
                     fy.unwrap_or(false),
+                )
+            })
+        },
+    )?;
+
+    reg.function(
+        &TLINE,
+        |lua, (x0, y0, x1, y1, u, v, du, dv, sx, sy, sw, sh, thick): TlineArgs| {
+            draw_gfx(lua, |ctx| {
+                ctx.state.tline(
+                    (coord(x0), coord(y0), coord(x1), coord(y1)),
+                    Texture {
+                        u: to_fixed(u),
+                        v: to_fixed(v),
+                        du: to_fixed(du),
+                        dv: to_fixed(dv),
+                        x: coord(sx.unwrap_or(0.0)),
+                        y: coord(sy.unwrap_or(0.0)),
+                        w: sw.map_or(i32::MAX, coord),
+                        h: sh.map_or(i32::MAX, coord),
+                        thick: coord(thick.unwrap_or(1.0)),
+                    },
                 )
             })
         },
@@ -158,6 +198,49 @@ binding!(SSPR {
         ("flip_y", "false"),
     ],
     errors: &["no_sheet"],
+});
+
+binding!(TLINE {
+    name: "tline",
+    scope: Scope::Global,
+    group: Group::Sprites,
+    sigs: &[Sig::new(
+        "tline(x0, y0, x1, y1, u, v, du, dv, [sx, sy, sw, sh, thick])",
+        "nothing; a line of pixels sampling the sheet at `(u, v)` and \
+         stepping `(du, dv)` texels a pixel",
+    )],
+    price: Price::Pixels,
+    defaults: &[
+        ("sx", "0"),
+        ("sy", "0"),
+        ("sw", "the sheet's width from `sx` on"),
+        ("sh", "the sheet's height from `sy` on"),
+        ("thick", "1"),
+    ],
+    errors: &["no_sheet"],
+    doc: "Both ends are drawn, along the same line `line` would draw, and \
+          the sheet is sampled the same way for a row, a column or a slant: \
+          pixel `i` of the line, counting from the first end, reads texel \
+          `(u + i * du, v + i * dv)`, rounded down. That is a perspective \
+          floor drawn a row at a time, and a textured wall drawn a column \
+          at a time with `dv` the texels a pixel of the column covers. \
+          `sx, sy, sw, sh` name the rectangle of the sheet the texels are \
+          in; the position wraps round its edges, whatever its size, so a \
+          floor tile repeats and a column longer than its texture starts \
+          it again. A rectangle not wholly in the sheet is cut to the \
+          sheet, and `u, v` count from the corner of the cut one; a \
+          rectangle with no sheet in it draws nothing. `u, v, du, dv` are \
+          fixed point with sixteen fraction bits, so a step finer than \
+          1/65536 of a texel is lost, and their magnitudes saturate at \
+          2^32. Only the part of the line in the clip is walked and paid \
+          for, with a camera offset and the colour table applied as for \
+          `sspr` and no fill pattern. With `thick` above 1 each step of the \
+          line draws that many pixels of its texel side by side: down from \
+          a row, to the right of a column (a slanted line counts as a row \
+          when it is at least as wide as it is tall). A pair of columns drawn as \
+          one, or a floor drawn two rows at a time, is half the calls for \
+          half the detail across. A line is paid like any draw call, by \
+          the pixels it touches.",
 });
 
 binding!(MAP {

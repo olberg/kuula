@@ -1,0 +1,12 @@
+[package]
+name = "kuula-touch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "On-screen controls for a touch screen: where the picture and the controls go, which button a finger holds, and drawing both."
+
+[dependencies]
+kuula-core.workspace = true
+
+[dev-dependencies]
+png.workspace = true

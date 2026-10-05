@@ -13,10 +13,14 @@ use crate::cell::{Effect, Note};
 
 pub(crate) use ijson::parse_ijson;
 pub use ijson::MAX_DEPTH;
+// What the bank loader (OMQ, `omq.rs`) reads instruments, samples, tracks and cells with.
+pub(crate) use instruments::{load_instruments, load_samples};
+pub(crate) use load::{join, load_rate_tick, load_tracks, load_volume_resampling, Ctx};
 #[cfg(test)]
 pub(crate) use load::load_as;
 pub use load::{load, load_sources, parse_global, Resource, Source};
 pub use profile::{fits, profile_violations, tier, PROFILES};
+pub(crate) use profile::{tier_of, Kuula};
 
 /// The OMT version this engine reads and writes, major.minor: the one constant the reader's version
 /// comes from.

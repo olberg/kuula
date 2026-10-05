@@ -190,6 +190,7 @@ fn hello_runs_steps_screenshots_and_stops() {
         (Some(320), Some(240))
     );
     assert_eq!(v["title"], "Hello");
+    assert_eq!(v["buttons"], "two");
     assert_eq!(v["running"], true);
 
     let v = structured(&replies[3]);
@@ -438,9 +439,9 @@ fn bad_arguments_are_tool_errors_and_bad_calls_are_rpc_errors() {
             call(
                 6,
                 "step",
-                json!({"console": "c1", "input": [{"buttons": ["start"]}]}),
+                json!({"console": "c1", "input": [{"buttons": ["turbo"]}]}),
             ),
-            call(7, "input", json!({"console": "c1", "frames": [64]})),
+            call(7, "input", json!({"console": "c1", "frames": [16384]})),
             call(8, "profile", json!({"console": "c1", "last": 0})),
         ],
     );
@@ -592,7 +593,7 @@ fn deploy_resolves_the_cart_under_the_root_and_returns_the_four_results() {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    type Seen = Vec<(String, usize, bool, String)>;
+    type Seen = Vec<(String, usize, bool, String, bool)>;
     let seen: Rc<RefCell<Seen>> = Rc::default();
     let log = seen.clone();
     let deploy: kuula_mcp::DeployFn = Rc::new(move |req| {
@@ -601,10 +602,14 @@ fn deploy_resolves_the_cart_under_the_root_and_returns_the_four_results() {
             req.snapshot.len(),
             req.snapshot.get("main.lua").is_some(),
             req.to.clone(),
+            req.screenshot,
         ));
         if req.to == "refused" {
             return Err(kuula_mcp::ToolError::new("deploy_unpaired", "not approved"));
         }
+        // A transport that can read the receiver's log and see its screen
+        // (adb) fills these; the Iroh one leaves them empty.
+        let device = req.to == "adb";
         Ok(kuula_mcp::DeployOutcome {
             name: req.name,
             bytes: 1234,
@@ -615,6 +620,15 @@ fn deploy_resolves_the_cart_under_the_root_and_returns_the_four_results() {
             validation: "ok".into(),
             install: "ok".into(),
             restart: "started".into(),
+            log: if device {
+                vec![
+                    "cart: hi\u{7}".into(),
+                    "deploy: started my-cart.cart".into(),
+                ]
+            } else {
+                Vec::new()
+            },
+            screenshot: (device && req.screenshot).then(|| b"\x89PNG-bytes".to_vec()),
         })
     });
     let scratch = Scratch::new();
@@ -631,6 +645,16 @@ fn deploy_resolves_the_cart_under_the_root_and_returns_the_four_results() {
                 6,
                 "deploy",
                 json!({"cart": "my-cart", "to": "t".repeat(2000)}),
+            ),
+            call(
+                7,
+                "deploy",
+                json!({"cart": "my-cart", "to": "adb", "screenshot": true}),
+            ),
+            call(
+                8,
+                "deploy",
+                json!({"cart": "my-cart", "to": "adb", "screenshot": "yes"}),
             ),
         ],
         Some(deploy),
@@ -659,9 +683,31 @@ fn deploy_resolves_the_cart_under_the_root_and_returns_the_four_results() {
     assert_eq!(error_code(&replies[3]), "path_outside_root");
     assert_eq!(error_code(&replies[4]), "cart_not_found");
     assert_eq!(error_code(&replies[5]), "invalid_arguments");
-    // Only the two well-formed calls reached the function, and each saw
+    // No log and no picture from a receiver that gives none.
+    assert_eq!(v["log"], json!([]));
+    assert_eq!(v["screenshot"], false);
+    assert_eq!(replies[1]["result"]["content"].as_array().unwrap().len(), 1);
+    // A device's log comes back cleaned, and its screen as an image block
+    // after the text.
+    let v = structured(&replies[6]);
+    assert_eq!(
+        v["log"],
+        json!(["cart: hi", "deploy: started my-cart.cart"])
+    );
+    assert_eq!(v["screenshot"], true);
+    let content = replies[6]["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["mimeType"], "image/png");
+    assert_eq!(content[1]["data"], "iVBORy1ieXRlcw==");
+    assert_eq!(error_code(&replies[7]), "invalid_arguments");
+    // Only the three well-formed calls reached the function, and each saw
     // the cart as the other tools do.
     let seen = seen.borrow();
-    assert_eq!(seen.len(), 2, "{seen:?}");
-    assert_eq!(seen[0], ("my-cart".into(), 1, true, "ticket1".into()));
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert_eq!(
+        seen[0],
+        ("my-cart".into(), 1, true, "ticket1".into(), false)
+    );
+    assert_eq!(seen[2], ("my-cart".into(), 1, true, "adb".into(), true));
 }

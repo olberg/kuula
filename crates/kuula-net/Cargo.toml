@@ -15,12 +15,12 @@ socket2 = "=0.6.5"
 # The deploy package digest; the version kuula-core already pins.
 sha2 = "=0.10.9"
 url = "2"
-iroh = { version = "=1.2.0", default-features = false, features = ["tls-ring"] }
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
 iroh-tickets = "=1.0.0"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 
 [dev-dependencies]
-iroh-relay = { version = "=1.2.0", default-features = false, features = ["server"] }
+iroh-relay = { version = "=1.3.0", default-features = false, features = ["server"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # The lifecycle test counts this process's threads.

@@ -364,7 +364,19 @@ impl Buf {
 }
 
 /// Lua numbers to integers: floor, saturate.
+///
+/// Every coordinate of every call goes through this. A number in the range
+/// of an `i32`, which is nearly every one a cart passes, is converted by
+/// the processor's own instruction and stepped down when that rounded a
+/// negative fraction up. On a 32-bit processor the general way is two
+/// library routines, `floor` and the conversion to 64 bits, and they were
+/// most of what a drawing call cost there.
 pub fn to_int(v: f64) -> i64 {
+    if (-2_147_483_648.0..2_147_483_648.0).contains(&v) {
+        let towards_zero = v as i32;
+        let down = (towards_zero as f64) > v;
+        return towards_zero as i64 - down as i64;
+    }
     if v.is_nan() {
         0
     } else {
@@ -478,6 +490,71 @@ impl std::error::Error for BufError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `to_int` as it reads: floor, then the saturating conversion.
+    fn to_int_plainly(v: f64) -> i64 {
+        if v.is_nan() {
+            0
+        } else {
+            v.floor() as i64
+        }
+    }
+
+    #[test]
+    fn to_int_floors_and_saturates_whichever_way_it_is_made() {
+        let edge = 2_147_483_648.0f64;
+        let mut values = vec![
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.0,
+            -1.0,
+            0.999_999_999,
+            -0.000_000_001,
+            2.7,
+            -2.7,
+            edge,
+            -edge,
+            edge - 1.0,
+            edge - 0.5,
+            -edge + 0.5,
+            -edge - 0.5,
+            -edge - 1.0,
+            edge + 0.5,
+            4_294_967_296.5,
+            -4_294_967_296.5,
+            1e18,
+            -1e18,
+            1e300,
+            -1e300,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+            f64::EPSILON,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+        // And a spread of ordinary and of large numbers, with fractions.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for i in 0..20_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let unit = (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+            let span = [4.0, 1000.0, 70_000.0, 5e9, 1e12][i % 5];
+            values.push(unit * span);
+        }
+        for v in values {
+            assert_eq!(to_int(v), to_int_plainly(v), "{v:?}");
+        }
+        assert_eq!(to_int(-0.5), -1);
+        assert_eq!(to_int(-edge - 0.5), -2_147_483_649);
+        assert_eq!(to_int(f64::NAN), 0);
+        assert_eq!(to_int(f64::INFINITY), i64::MAX);
+    }
 
     fn numbered(w: u32, h: u32) -> Buf {
         let mut b = Buf::new(BufKind::U8, w, h).unwrap();

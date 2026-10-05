@@ -3,7 +3,9 @@ use std::rc::Rc;
 use crate::audio::VALUES_PER_FRAME;
 use crate::draw::DrawState;
 use crate::fault::Fault;
-use crate::input::{FrameInput, BTN_MENU};
+use crate::input::{
+    Chord, FrameInput, BASE_BUTTONS, BTN_A, BTN_MENU, BTN_SELECT, BTN_START, CART_BUTTONS,
+};
 use crate::manifest::{Manifest, ManifestError, ScreenMode, MANIFEST_FILE};
 use crate::meter::FrameProfile;
 use crate::net::{self, NetEnv, NetState};
@@ -126,7 +128,11 @@ struct Shell {
     /// Buttons held when the shell handed the screen to the cart. They
     /// stay masked from the cart until released, so the A that chose a
     /// cart in the list is not an A press inside that cart.
-    stale: u8,
+    stale: u16,
+    /// Buttons held when the shell took the buttons from the cart. They
+    /// stay masked from the shell until released, so the Start that
+    /// paused a cart is not the press that resumes it.
+    shell_stale: u16,
     opener: CartOpener,
     factory: GuestFactory,
     preload: Preload,
@@ -138,12 +144,23 @@ struct Shell {
 pub struct Console {
     cart: Cart,
     shell: Option<Shell>,
+    /// Start and Select held together are Menu, for every input.
+    chord: Chord,
     silence: Vec<i16>,
     /// What a cart that declares the net service starts with.
     net_env: NetEnv,
 }
 
 mod net_side;
+
+/// Whether the shell has the buttons: its overlay is up over a cart, or
+/// there is no cart to play.
+fn overlay_up(shell: &Shell, cart: &Cart) -> bool {
+    shell.state.sys.as_ref().is_some_and(|s| s.network.overlay)
+        || shell.paused
+        || cart.guest.is_none()
+        || cart.status.fault().is_some()
+}
 
 impl Cart {
     /// Read `cart.toml` and `main.lua` from `source`, decode the preload
@@ -260,6 +277,8 @@ impl Cart {
     }
 
     fn step(&mut self, input: FrameInput) {
+        // A button the manifest does not declare is never held.
+        let input = FrameInput::new(input.buttons & self.manifest.buttons.mask());
         if let (ConsoleState::Running, Some(guest)) = (&self.status, self.guest.as_mut()) {
             self.frame += 1;
             // The frame's batch: what the host offered, up to the bound,
@@ -333,6 +352,7 @@ impl Console {
         Console {
             cart,
             shell: None,
+            chord: Chord::default(),
             silence: vec![0; VALUES_PER_FRAME],
             net_env: NetEnv::default(),
         }
@@ -364,6 +384,7 @@ impl Console {
             paused: false,
             menu_was: false,
             stale: 0,
+            shell_stale: 0,
             opener,
             factory,
             preload,
@@ -438,23 +459,27 @@ impl Console {
     pub fn step_with(&mut self, input: FrameInput, events: Vec<net::Event>) -> FrameOutput<'_> {
         self.offer_net_events(events);
         self.cart.state.log.clear();
+        let input = FrameInput::new(self.chord.apply(input.buttons));
         let Some(shell) = self.shell.as_mut() else {
             self.cart.step(input.for_cart());
             return self.output();
         };
 
-        // The Menu key is the shell's; the cart never sees it.
-        let menu = input.buttons & BTN_MENU != 0;
+        let network_overlay = shell.state.sys.as_ref().is_some_and(|s| s.network.overlay);
+        let overlay_active = overlay_up(shell, &self.cart);
+        shell.stale &= input.buttons;
+        shell.shell_stale &= input.buttons;
+        let fresh = input.buttons & !shell.stale;
+
+        // The Menu key is the shell's; the cart never sees it. Start and
+        // Select are Menu as well while a cart that has neither plays, so
+        // that no button of a controller is dead there.
+        let spare = (BTN_START | BTN_SELECT) & !self.cart.manifest.buttons.mask();
+        let menu = input.buttons & BTN_MENU != 0 || (!overlay_active && fresh & spare != 0);
         let menu_pressed = menu && !shell.menu_was;
         shell.menu_was = menu;
-        let network_overlay = shell.state.sys.as_ref().is_some_and(|s| s.network.overlay);
-        let overlay_active = network_overlay
-            || shell.paused
-            || self.cart.guest.is_none()
-            || self.cart.status.fault().is_some();
 
-        shell.stale &= input.buttons;
-        let cart_input = FrameInput::new(input.buttons & !shell.stale).for_cart();
+        let cart_input = FrameInput::new(fresh).for_cart();
         if !shell.paused {
             self.cart.step(if network_overlay {
                 FrameInput::NONE
@@ -491,7 +516,12 @@ impl Console {
                 .unwrap_or_default();
         }
         let shell_input = if overlay_active {
-            input.for_cart()
+            let mut held = input.buttons & CART_BUTTONS & !shell.shell_stale;
+            // On the shell's screens Start chooses, as A does.
+            if held & BTN_START != 0 {
+                held |= BTN_A;
+            }
+            FrameInput::new(held)
         } else {
             FrameInput::NONE
         };
@@ -511,12 +541,12 @@ impl Console {
             self.apply(r);
         }
         let shell = self.shell.as_mut().expect("shell survives its step");
-        let overlay_now = shell.state.sys.as_ref().is_some_and(|s| s.network.overlay)
-            || shell.paused
-            || self.cart.guest.is_none()
-            || self.cart.status.fault().is_some();
+        let overlay_now = overlay_up(shell, &self.cart);
         if overlay_active && !overlay_now {
             shell.stale = input.buttons;
+        }
+        if !overlay_active && overlay_now {
+            shell.shell_stale = input.buttons;
         }
         if shell.status.fault().is_none() {
             shell::compose(
@@ -566,6 +596,9 @@ impl Console {
                 self.install_cart(Cart::empty());
             }
             SysRequest::Paused(on) => shell.paused = on,
+            // The host's to carry out: it owns the loop and the receiver.
+            SysRequest::Exit => shell.host_requests.push(SysRequest::Exit),
+            SysRequest::Dev(answer) => shell.host_requests.push(SysRequest::Dev(answer)),
             SysRequest::SetScale(n) => {
                 if let Some(sys) = shell.state.sys.as_mut() {
                     sys.settings.scale = n;
@@ -592,8 +625,33 @@ impl Console {
         }
     }
 
+    /// Tell the shell it was started on one cart: it opens the first cart
+    /// of its list at once and asks the host to end where it would have
+    /// shown the list. A console without a shell has nothing to tell.
+    pub fn set_single_cart(&mut self, single: bool) {
+        if let Some(sys) = self.shell.as_mut().and_then(|s| s.state.sys.as_mut()) {
+            sys.single = single;
+        }
+    }
+
+    /// The development receiver as the shell shows it.
+    pub fn dev_view(&self) -> Option<&shell::DevView> {
+        self.shell
+            .as_ref()
+            .and_then(|s| s.state.sys.as_ref())
+            .map(|sys| &sys.dev)
+    }
+
+    /// The same, for the host that runs a receiver to fill.
+    pub fn dev_view_mut(&mut self) -> Option<&mut shell::DevView> {
+        self.shell
+            .as_mut()
+            .and_then(|s| s.state.sys.as_mut())
+            .map(|sys| &mut sys.dev)
+    }
+
     /// Requests the host carries out or persists (the window scale,
-    /// the volume, the network permission), drained.
+    /// the volume, the network permission, ending), drained.
     pub fn take_host_requests(&mut self) -> Vec<SysRequest> {
         match &mut self.shell {
             Some(s) => std::mem::take(&mut s.host_requests),
@@ -655,6 +713,22 @@ impl Console {
 
     pub fn screen_mode(&self) -> ScreenMode {
         self.cart.manifest.screen_mode
+    }
+
+    /// The buttons whoever has the input can use now, as `BTN_*` bits:
+    /// the D-pad, A and B while the shell's overlay is up, and what the
+    /// cart's manifest declares while the cart plays. A touch screen
+    /// shows these and Menu.
+    pub fn buttons_in_use(&self) -> u16 {
+        let shell_up = self
+            .shell
+            .as_ref()
+            .is_some_and(|shell| overlay_up(shell, &self.cart));
+        if shell_up {
+            BASE_BUTTONS
+        } else {
+            self.cart.manifest.buttons.mask()
+        }
     }
 
     /// The draw state, for hosts and tests that inspect resources.

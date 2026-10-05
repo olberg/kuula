@@ -28,6 +28,7 @@
 //! with the cart still running, 1 when the cart faulted or the worker
 //! failed, 2 on a usage error, 3 when `net` failed.
 
+mod adb;
 mod broker;
 #[cfg(feature = "net")]
 mod deploy_cmd;
@@ -55,6 +56,7 @@ use kuula_core::{
     Console, Guest, MemoryStore, Preload, Recorder, RecordingGuest, SaveStore, SharedRecorder,
     Snapshot, SnapshotLimits, WriteThroughStore,
 };
+use kuula_host_common::carts::is_archive;
 use kuula_host_sdl::HostOptions;
 use kuula_lua::LuaGuest;
 
@@ -175,6 +177,10 @@ enum Command {
         /// examples/ when carts/ is missing).
         #[arg(long)]
         carts: Option<PathBuf>,
+        /// One cart, a directory or a .zip or .cart file: the shell opens
+        /// it at once and ends when it is quit, instead of listing carts.
+        #[arg(long, conflicts_with_all = ["carts", "dev_receiver"])]
+        cart: Option<PathBuf>,
         /// Window scale, 1 to 4; the saved setting when absent.
         #[arg(long, value_parser = kuula_host_sdl::scale::parse)]
         scale: Option<u32>,
@@ -217,12 +223,12 @@ enum Command {
         #[command(subcommand)]
         command: deploy_cmd::DeployCommand,
     },
-    /// Push a development cart to another desktop (this build has no
-    /// networking).
+    /// Push a development cart: to an Android device over adb (`push
+    /// <cart> --to adb`); this build has no networking for the rest.
     #[cfg(not(feature = "net"))]
     Deploy {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: Option<adb::OfflineDeploy>,
     },
     /// Internal: the hostile probe behind the sandbox tests.
     #[command(hide = true)]
@@ -370,6 +376,7 @@ fn main() -> ExitCode {
     }
     let command = cli.command.unwrap_or(Command::Shell {
         carts: None,
+        cart: None,
         scale: None,
         in_process: false,
         no_sandbox: false,
@@ -479,6 +486,7 @@ fn main() -> ExitCode {
         },
         Command::Shell {
             carts,
+            cart,
             scale,
             in_process,
             no_sandbox,
@@ -490,17 +498,40 @@ fn main() -> ExitCode {
                 bind: bind.or(cli.bind),
             });
             match (&dev, netlink::unavailable()) {
+                // The flag before the `shell` word is another argument to
+                // the parser, which only knows the one after it conflicts.
+                (Some(_), _) if cart.is_some() => plain_usage(
+                    "--cart and --dev-receiver do not go together: a shell on one cart installs no others",
+                ),
                 (Some(_), Some(why)) => plain_usage(why),
                 _ => match CartRunner::new(in_process, no_sandbox, true) {
                     Err(code) => code,
-                    Ok(runner) => shell::run(carts.as_deref(), scale, runner, dev),
+                    Ok(runner) => {
+                        let carts = match &cart {
+                            Some(one) => shell::Carts::One(one),
+                            None => shell::Carts::Listed(carts.as_deref()),
+                        };
+                        shell::run(carts, scale, runner, dev)
+                    }
                 },
             }
         }
         #[cfg(feature = "net")]
         Command::Deploy { command } => deploy_cmd::main(command),
         #[cfg(not(feature = "net"))]
-        Command::Deploy { .. } => plain_usage(netlink::unavailable().unwrap_or_default()),
+        Command::Deploy { command } => match command {
+            Some(adb::OfflineDeploy::Push {
+                cart,
+                to,
+                screenshot,
+            }) => match adb::target(&to) {
+                Some(Ok(target)) => adb::push_cli(&cart, &target, screenshot.as_deref()),
+                Some(Err(why)) => plain_usage(&why),
+                // A receiver's ticket: that is networking.
+                None => plain_usage(netlink::unavailable().unwrap_or_default()),
+            },
+            _ => plain_usage(netlink::unavailable().unwrap_or_default()),
+        },
         Command::Build { dir, out } => build(&dir, &out),
         Command::NetSim(options) => net_sim::run(options),
         Command::Worker => worker::main(),
@@ -530,16 +561,31 @@ fn mcp_transport() -> Option<kuula_mcp::TransportFactory> {
     None
 }
 
-/// The push the MCP `deploy` tool uses: over Iroh, or none without the
-/// `net` feature, where the tool answers `deploy_unavailable`.
-#[cfg(feature = "net")]
+/// The push the MCP `deploy` tool uses: to an Android device over `adb`
+/// when the target says so, in any build, and otherwise to a receiver
+/// over Iroh, which a build without the `net` feature has not.
 fn mcp_deploy() -> Option<kuula_mcp::DeployFn> {
-    Some(Rc::new(deploy_cmd::mcp_push))
+    Some(Rc::new(|request| match adb::target(&request.to) {
+        Some(target) => adb::mcp_push(target, request),
+        None => mcp_deploy_net(request),
+    }))
+}
+
+#[cfg(feature = "net")]
+fn mcp_deploy_net(
+    request: kuula_mcp::DeployRequest,
+) -> Result<kuula_mcp::DeployOutcome, kuula_mcp::ToolError> {
+    deploy_cmd::mcp_push(request)
 }
 
 #[cfg(not(feature = "net"))]
-fn mcp_deploy() -> Option<kuula_mcp::DeployFn> {
-    None
+fn mcp_deploy_net(
+    _: kuula_mcp::DeployRequest,
+) -> Result<kuula_mcp::DeployOutcome, kuula_mcp::ToolError> {
+    Err(kuula_mcp::ToolError::new(
+        "deploy_unavailable",
+        "this server was started without networking",
+    ))
 }
 
 /// `kuula build`: snapshot the directory and write it as a deterministic
@@ -570,15 +616,6 @@ fn build(dir: &Path, out: &Path) -> u8 {
         out.display()
     );
     EXIT_OK
-}
-
-/// Whether a cart path names a packed cart rather than a directory.
-fn is_archive(path: &Path) -> bool {
-    path.is_file()
-        && path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("zip") || e.eq_ignore_ascii_case("cart"))
 }
 
 /// An error line and the usage exit code, for options that are not

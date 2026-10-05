@@ -65,7 +65,8 @@ pub unsafe extern "C" fn kuu_fixnan(
     if !b"eEfFgGaA".contains(&conv) {
         return len;
     }
-    let out = std::slice::from_raw_parts_mut(buf as *mut u8, size);
+    // `c_char` is `u8` on some targets (Android) and `i8` on others.
+    let out = std::slice::from_raw_parts_mut(buf.cast::<u8>(), size);
     if !has_nan(&out[..len as usize]) {
         return len;
     }
@@ -213,6 +214,15 @@ pub fn pin_fp_environment() {
             options(nomem, nostack),
         );
     }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: reads and writes FPCR only; clears AHP, DN, FZ and the
+    // rounding mode, which are bits 26 to 22 there as in FPSCR.
+    unsafe {
+        let mut fpcr: u64;
+        std::arch::asm!("mrs {t}, fpcr", t = out(reg) fpcr, options(nomem, nostack));
+        fpcr &= !0x07c0_0000;
+        std::arch::asm!("msr fpcr, {t}", t = in(reg) fpcr, options(nomem, nostack));
+    }
     #[cfg(target_arch = "x86_64")]
     // SAFETY: reads and writes MXCSR only; clears flush-to-zero (15),
     // denormals-are-zero (6) and the rounding mode (14 to 13).
@@ -273,8 +283,15 @@ mod tests {
     }
 
     /// The state a loaded library can leave behind, set by hand.
-    #[cfg(any(target_arch = "arm", target_arch = "x86_64"))]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64", target_arch = "x86_64"))]
     fn flush_to_zero() {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let mut fpcr: u64;
+            std::arch::asm!("mrs {t}, fpcr", t = out(reg) fpcr, options(nomem, nostack));
+            fpcr |= 0x0100_0000;
+            std::arch::asm!("msr fpcr, {t}", t = in(reg) fpcr, options(nomem, nostack));
+        }
         #[cfg(target_arch = "arm")]
         unsafe {
             std::arch::asm!(
@@ -295,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_arch = "arm", target_arch = "x86_64"))]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64", target_arch = "x86_64"))]
     fn pinning_restores_subnormals() {
         use std::hint::black_box;
         flush_to_zero();

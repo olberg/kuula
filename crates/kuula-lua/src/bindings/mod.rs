@@ -216,7 +216,8 @@ binding!(BTN {
     )],
     price: Price::One,
     doc: "There is no `btnp`; keep last frame's state yourself to detect \
-          presses.",
+          presses. Buttons 6 to 13 are held only in a cart whose manifest \
+          says `buttons = \"all\"`.",
 });
 
 binding!(STAT {

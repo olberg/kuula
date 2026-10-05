@@ -456,19 +456,63 @@ fn an_unapproved_endpoint_is_closed_with_code_5_and_nothing_is_written() {
     let id = env.tx.id().unwrap();
     let pkg = package("hello", "x = 1");
 
-    // The close comes before any stream: the raw peer opens none.
+    // A raw peer that opens no stream is closed all the same, once the
+    // receiver has waited for what it would send; it is reported with
+    // nothing offered.
     assert_eq!(
         close_code_of(rx.ticket(), env.tx.secret_key().unwrap()),
         Some(close::UNPAIRED)
     );
+    let event = rx.next_event(WAIT).expect("an Unpaired event");
+    assert_eq!(
+        event,
+        DeployEvent::Unpaired {
+            id: id.clone(),
+            asked: None
+        }
+    );
+    // A push is refused as before, and the receiver says who was refused
+    // and what it offered, so a person can approve it.
+    std::thread::sleep(Duration::from_millis(1100));
     let e = env.push(rx.ticket(), &pkg).unwrap_err();
     assert_eq!(e.code(), "deploy_unpaired", "{e}");
     assert!(matches!(e, DeployError::Refused(_)));
-    // The receiver says who was refused, so a person can approve it.
     let event = rx.next_event(WAIT).expect("an Unpaired event");
-    assert_eq!(event, DeployEvent::Unpaired { id: id.clone() });
+    assert_eq!(
+        event,
+        DeployEvent::Unpaired {
+            id: id.clone(),
+            asked: Some(Asked {
+                name: "hello".into(),
+                bytes: pkg.bytes().len() as u32,
+                from: "127.0.0.1".into(),
+            })
+        }
+    );
+    // Another from the same id within the second is closed unread and
+    // not reported.
+    let e = env.push(rx.ticket(), &pkg).unwrap_err();
+    assert_eq!(e.code(), "deploy_unpaired", "{e}");
+    assert_eq!(rx.next_event(Duration::from_millis(300)), None);
+    // Another id in that same second is reported: one sender that keeps
+    // asking does not take another's turn.
+    let other = DeployStore::new(&env.root.join("other"));
+    let e = push(&loopback(), other.secret_key().unwrap(), rx.ticket(), &pkg).unwrap_err();
+    assert_eq!(e.code(), "deploy_unpaired", "{e}");
+    match rx.next_event(WAIT).expect("the other id is reported") {
+        DeployEvent::Unpaired {
+            id: reported,
+            asked,
+        } => {
+            assert_eq!(reported, other.id().unwrap());
+            assert_eq!(asked.map(|a| a.name), Some("hello".to_string()));
+        }
+        event => panic!("{event:?}"),
+    }
+    // Nothing of the offers was staged or installed.
     assert!(env.carts_listing().is_empty(), "{:?}", env.carts_listing());
     assert!(env.staging().is_empty());
+    std::thread::sleep(Duration::from_millis(1100));
 
     // Approving while the receiver runs takes effect for the next
     // connection; revoking takes it away again.

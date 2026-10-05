@@ -1,6 +1,6 @@
 //! SDL2 desktop host: a window, an integer scaler, 60 Hz pacing and a
-//! keyboard mapped to the logical controller. The core never learns the
-//! scale.
+//! keyboard and controllers mapped to the logical controller. The core
+//! never learns the scale.
 //!
 //! When the cart faults the host draws the core's error screen over the
 //! last complete frame and offers A to restart
@@ -16,7 +16,7 @@ pub mod convert;
 pub mod device;
 mod gamepad;
 pub mod keys;
-pub mod pacing;
+pub use kuula_host_common::pacing;
 pub mod scale;
 mod text_input;
 
@@ -34,6 +34,7 @@ use sdl2::pixels::PixelFormatEnum;
 
 use device::{HoldToExit, Profile};
 use keys::{KeyState, Layout};
+use kuula_host_common::chord::MenuChord;
 use pacing::{Clock, RealClock, Scheduler};
 
 pub struct HostOptions {
@@ -65,7 +66,8 @@ impl HostOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     WindowClosed,
-    /// B on the error screen, or Menu held on a handheld.
+    /// B on the error screen, Menu held on a handheld, or the shell
+    /// asking to end (`sys.exit()`).
     Quit,
 }
 
@@ -130,6 +132,7 @@ pub fn run(
     let mut keys = KeyState::new(layout);
     let mut hold_menu = HoldToExit::default();
     let mut editor_keys = KeyState::default();
+    let mut chord = MenuChord::default();
     // A device may take audio faster than it plays it while a queue of its
     // own fills; that passes on silence here, before the first frame.
     if let Some(a) = &audio {
@@ -154,9 +157,16 @@ pub fn run(
         let host_error_screen = console.state().fault().is_some()
             && (!console.has_shell() || console.shell_fault().is_some());
         let faulted = host_error_screen;
-        let editing = console
-            .network_view()
-            .is_some_and(|v| !v.editing.is_empty());
+        // A handheld has no keyboard: its buttons arrive as keys, and a
+        // field is filled with the shell's on-screen keys. And while the
+        // shell asks about a developer, over whatever it was showing, the
+        // keys are the buttons that answer.
+        let asking = console.dev_view().is_some_and(|d| !d.pending.is_empty());
+        let editing = layout != Layout::Handheld
+            && !asking
+            && console
+                .network_view()
+                .is_some_and(|v| !v.editing.is_empty());
         if editing {
             video.text_input().start();
         } else {
@@ -166,7 +176,9 @@ pub fn run(
             if let Some(pads) = gamepads.as_mut() {
                 pads.event(&event);
             }
-            if text_input::event(&event, &mut console, &video, &mut editor_keys) {
+            if layout != Layout::Handheld
+                && text_input::event(&event, &mut console, &video, &mut editor_keys)
+            {
                 continue;
             }
             match event {
@@ -226,11 +238,11 @@ pub fn run(
         for _ in 0..steps {
             // Step, then read the frame back through the shared borrow so
             // the state can be inspected beside it.
-            let input = kuula_core::FrameInput::new(
+            let input = kuula_core::FrameInput::new(chord.apply(
                 keys.input().buttons
                     | editor_keys.input().buttons
                     | gamepads.as_mut().map(|p| p.buttons()).unwrap_or(0),
-            );
+            ));
             if profile.hold_menu_to_exit() && hold_menu.tick(input.buttons & BTN_MENU != 0) {
                 break 'main Exit::Quit;
             }
@@ -245,8 +257,10 @@ pub fn run(
                 eprintln!("save: {e}");
             }
             let requests = console.take_host_requests();
+            let mut leave = false;
             for request in &requests {
                 match request {
+                    SysRequest::Exit => leave = true,
                     SysRequest::SetScale(new_scale) => {
                         window_scale = clamp_scale(*new_scale);
                         console.set_effective_scale(window_scale);
@@ -267,6 +281,9 @@ pub fn run(
             text_input::requests(&requests, &mut console, &video);
             if let Some(service) = shell_service.as_mut() {
                 service(&mut console, &requests);
+            }
+            if leave {
+                break 'main Exit::Quit;
             }
             if requests.iter().any(|r| {
                 matches!(

@@ -68,23 +68,142 @@ pub fn sspr(
         return;
     }
     let (sheet_w, sheet_h) = (sheet.width() as i64, sheet.height() as i64);
+    // The source column of each destination column, and the same for rows,
+    // is walked instead of worked out: a division for every pixel is a
+    // library call on a 32-bit machine, and most sprites are not scaled.
+    let mut rows = Walk::new(dest.y - dy, sh, dh, flip_y);
+    let (width, table) = (s.width as usize, &pen.table);
+    let (x0, x1) = (dest.x as usize, dest.right() as usize);
+    // A sprite at its own width, which is every `spr` and every map tile:
+    // the destination columns that have a source column are one run, and
+    // the source columns are the same run, forwards or backwards.
+    let run = (sw == dw).then(|| {
+        // The first source column, and the destination columns it and
+        // the sheet's last column land on.
+        let (first, lo, hi) = if flip_x {
+            let last = dx as i64 + sx as i64 + dw as i64 - 1;
+            (
+                sx as i64 + dw as i64 - 1 - (dest.x - dx) as i64,
+                last - (sheet_w - 1),
+                last,
+            )
+        } else {
+            let zero = dx as i64 - sx as i64;
+            (sx as i64 + (dest.x - dx) as i64, zero, zero + sheet_w - 1)
+        };
+        let a = (dest.x as i64).max(lo);
+        let b = (dest.right() as i64 - 1).min(hi);
+        // The source column under destination column `a`.
+        let skipped = a - dest.x as i64;
+        let from = if flip_x {
+            first - skipped
+        } else {
+            first + skipped
+        };
+        (a, b, from)
+    });
+    // Scaled across: the walk, started once and taken up again by each row.
+    let columns = run
+        .is_none()
+        .then(|| Walk::new(dest.x - dx, sw, dw, flip_x));
     for py in dest.y..dest.bottom() {
-        let j = (py - dy) as i64;
-        let j = if flip_y { dh as i64 - 1 - j } else { j };
-        let row = sy as i64 + j * sh as i64 / dh as i64;
+        let row = sy as i64 + rows.next();
         if row < 0 || row >= sheet_h {
             continue;
         }
-        for px in dest.x..dest.right() {
-            let i = (px - dx) as i64;
-            let i = if flip_x { dw as i64 - 1 - i } else { i };
-            let col = sx as i64 + i * sw as i64 / dw as i64;
+        let from = &src[(row * sheet_w) as usize..][..sheet_w as usize];
+        // `dest` is inside the clip, which is inside the target.
+        let line = &mut s.pixels[py as usize * width..][..width];
+        if let Some((a, b, first)) = run {
+            if a > b {
+                continue;
+            }
+            let n = (b - a + 1) as usize;
+            let to = &mut line[a as usize..][..n];
+            if flip_x {
+                let from = &from[(first + 1) as usize - n..][..n];
+                for (dst, &c) in to.iter_mut().zip(from.iter().rev()) {
+                    *dst = table.lookup(c, *dst);
+                }
+            } else {
+                let from = &from[first as usize..][..n];
+                for (dst, &c) in to.iter_mut().zip(from) {
+                    *dst = table.lookup(c, *dst);
+                }
+            }
+            s.touched += n as u64;
+            continue;
+        }
+        let Some(mut columns) = columns else {
+            continue;
+        };
+        for dst in &mut line[x0..x1] {
+            let col = sx as i64 + columns.next();
             if col < 0 || col >= sheet_w {
                 continue;
             }
-            let c = src[(row * sheet_w + col) as usize];
-            blend(s, pen, px, py, c);
+            s.touched += 1;
+            *dst = table.lookup(from[col as usize], *dst);
         }
+    }
+}
+
+/// `i * from / to` for `i` counting up from `first`, or, flipped, for
+/// `to - 1 - i`: the source offset of each step along a destination edge
+/// of `to` pixels that shows `from` source pixels. One division at the
+/// start, then additions; every value is the one the division would give.
+#[derive(Clone, Copy)]
+struct Walk {
+    /// The offset the next call returns, and its remainder over `to`.
+    at: i64,
+    rem: i64,
+    /// What a step adds to each, with its sign.
+    step: i64,
+    step_rem: i64,
+    to: i64,
+}
+
+impl Walk {
+    fn new(first: i32, from: i32, to: i32, flip: bool) -> Walk {
+        let (from, to) = (from as i64, to as i64);
+        let (i, sign) = if flip {
+            (to - 1 - first as i64, -1)
+        } else {
+            (first as i64, 1)
+        };
+        // At its own size, the usual case, the offset is the step itself
+        // and the divisions below would only say so.
+        if from == to {
+            return Walk {
+                at: i,
+                rem: 0,
+                step: sign,
+                step_rem: 0,
+                to,
+            };
+        }
+        Walk {
+            at: (i * from).div_euclid(to),
+            rem: (i * from).rem_euclid(to),
+            step: sign * (from / to),
+            step_rem: sign * (from % to),
+            to,
+        }
+    }
+
+    #[inline]
+    fn next(&mut self) -> i64 {
+        let at = self.at;
+        self.at += self.step;
+        self.rem += self.step_rem;
+        if self.rem >= self.to {
+            self.rem -= self.to;
+            self.at += 1;
+        } else if self.rem < 0 {
+            self.rem += self.to;
+            self.at -= 1;
+        }
+        at
     }
 }
 
@@ -188,6 +307,146 @@ pub fn print(s: &mut Surface, pen: &Pen, text: &str, x: i32, y: i32, c: u8) -> i
 mod tests {
     use super::*;
     use crate::raster::testing::*;
+
+    #[test]
+    fn a_walk_gives_what_the_division_gives() {
+        // Every scale up and down to 40, from every first column, both ways.
+        for from in 1..=40 {
+            for to in 1..=40 {
+                for first in 0..to {
+                    for flip in [false, true] {
+                        let mut walk = Walk::new(first, from, to, flip);
+                        for i in first..to {
+                            let i = if flip { to - 1 - i } else { i } as i64;
+                            assert_eq!(
+                                walk.next(),
+                                i * from as i64 / to as i64,
+                                "{from} over {to} from {first}, flipped {flip}, at {i}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Sizes near the largest a call can name.
+        let (from, to) = (i32::MAX, i32::MAX - 7);
+        let mut walk = Walk::new(to - 3, from, to, false);
+        for i in to - 3..to {
+            assert_eq!(walk.next(), i as i64 * from as i64 / to as i64);
+        }
+    }
+
+    /// `sspr` as it was first written, a division for every pixel: what
+    /// the walk and the run must reproduce, pixel for pixel and count for
+    /// count.
+    #[allow(clippy::too_many_arguments)]
+    fn sspr_by_division(
+        s: &mut Surface,
+        pen: &Pen,
+        sheet: &Buf,
+        (sx, sy, sw, sh): (i32, i32, i32, i32),
+        (dx, dy, dw, dh): (i32, i32, i32, i32),
+        (flip_x, flip_y): (bool, bool),
+    ) {
+        let src = sheet.as_u8().unwrap();
+        let (dx, dy) = pen.world(dx, dy);
+        let dest = Rect::new(dx, dy, dw, dh).intersect(&pen.clip);
+        let (sheet_w, sheet_h) = (sheet.width() as i64, sheet.height() as i64);
+        for py in dest.y..dest.bottom() {
+            let j = (py - dy) as i64;
+            let j = if flip_y { dh as i64 - 1 - j } else { j };
+            let row = sy as i64 + j * sh as i64 / dh as i64;
+            if row < 0 || row >= sheet_h {
+                continue;
+            }
+            for px in dest.x..dest.right() {
+                let i = (px - dx) as i64;
+                let i = if flip_x { dw as i64 - 1 - i } else { i };
+                let col = sx as i64 + i * sw as i64 / dw as i64;
+                if col < 0 || col >= sheet_w {
+                    continue;
+                }
+                blend(s, pen, px, py, src[(row * sheet_w + col) as usize]);
+            }
+        }
+    }
+
+    #[test]
+    fn sspr_draws_what_a_division_for_every_pixel_drew() {
+        // A sheet with a different value in every pixel, 0 (transparent
+        // by default) among them, and a target that is not blank, so a
+        // transparent source pixel is seen to leave what was there.
+        let mut sheet = Buf::new(crate::buf::BufKind::U8, 12, 10).unwrap();
+        for y in 0..10 {
+            for x in 0..12 {
+                sheet.set(x, y, ((x * 7 + y * 13) % 16) as f64);
+            }
+        }
+        let mut cases = 0;
+        // Source rectangles inside, across and outside the sheet's edges;
+        // destinations across every edge of the clip; every flip; at their
+        // own size, stretched and shrunk in either direction.
+        for (sx, sy, sw, sh) in [
+            (0, 0, 8, 8),
+            (3, 2, 5, 4),
+            (-2, -1, 6, 5),
+            (9, 7, 6, 6),
+            (12, 0, 4, 4),
+        ] {
+            for (dw, dh) in [
+                (sw, sh),
+                (sw, sh * 2),
+                (sw * 2, sh),
+                (sw * 3 / 2, sh / 2 + 1),
+                (1, 1),
+            ] {
+                for dx in [-9, -3, 0, 2, 11, 14, 16] {
+                    for dy in [-7, -1, 0, 5, 13] {
+                        for flips in [(false, false), (true, false), (false, true), (true, true)] {
+                            for (clip, camera) in [
+                                (Rect::new(0, 0, 16, 14), (0, 0)),
+                                (Rect::new(3, 2, 9, 8), (0, 0)),
+                                (Rect::new(0, 0, 16, 14), (2, -3)),
+                            ] {
+                                let draw = |walked: bool| {
+                                    let (mut buf, mut pen) = surface(16, 14);
+                                    buf.as_u8_mut().unwrap().fill(5);
+                                    pen.clip = clip;
+                                    pen.camera = camera;
+                                    let mut s = Surface::of(&mut buf).unwrap();
+                                    if walked {
+                                        sspr(
+                                            &mut s, &pen, &sheet, sx, sy, sw, sh, dx, dy, dw, dh,
+                                            flips.0, flips.1,
+                                        );
+                                    } else {
+                                        sspr_by_division(
+                                            &mut s,
+                                            &pen,
+                                            &sheet,
+                                            (sx, sy, sw, sh),
+                                            (dx, dy, dw, dh),
+                                            flips,
+                                        );
+                                    }
+                                    let touched = s.touched;
+                                    drop(s);
+                                    (pixels(&buf), touched)
+                                };
+                                assert_eq!(
+                                    draw(true),
+                                    draw(false),
+                                    "source {sx},{sy} {sw}x{sh} to {dx},{dy} {dw}x{dh}, flips {flips:?}, clip {clip:?}, camera {camera:?}"
+                                );
+                                cases += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 5 * 5 * 7 * 5 * 4 * 3);
+    }
 
     #[test]
     fn spr_flips_and_goes_through_the_table() {

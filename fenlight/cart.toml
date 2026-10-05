@@ -1,0 +1,7 @@
+[cart]
+title = "Fenlight"
+license = "MIT"
+screen_mode = "320x240"
+
+[preload]
+sheets = ["fenlight", "title"]

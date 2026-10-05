@@ -12,8 +12,60 @@
 /// isn't 0 (unknown) and differs from the frames decoded. The MD5, the sample rate and the frame
 /// sizes aren't checked.
 pub fn decode(bytes: &[u8], channels: u32, frames: u32) -> Option<Vec<i16>> {
+    let (info, data) = header(bytes)?;
+    if info.channels != channels || info.bits != 16 {
+        return None;
+    }
+    let want = frames as usize * channels as usize;
+    let out = body(data, &info, want)?;
+    (out.len() == want).then_some(out)
+}
+
+/// What a cue's FLAC file says of itself (OMQ section 4), without decoding it.
+pub struct Info {
+    pub rate: u32,
+    pub channels: u32,
+    pub bits: u32,
+    /// STREAMINFO's total samples of a channel, 0 when unknown.
+    pub total: u64,
+}
+
+/// STREAMINFO of a stream that starts with `fLaC` and whose metadata blocks are whole, or `None`.
+pub fn info(bytes: &[u8]) -> Option<Info> {
+    let (i, _) = header(bytes)?;
+    Some(Info { rate: i.rate, channels: i.channels, bits: i.bits, total: i.total })
+}
+
+/// What a cue's FLAC says of its kind, and nothing else (OMQ section 4): STREAMINFO's fixed fields,
+/// read when the payload has at least 42 bytes and its first metadata block is of type 0 and 34
+/// bytes long, or `None`, a FLAC without its STREAMINFO. The rest of the metadata and the frames
+/// aren't looked at: a file whose header says it isn't of the kind is left to the player however
+/// damaged it is, and only one of the kind can be damaged.
+pub fn stream_info(bytes: &[u8]) -> Option<Info> {
     let rest = bytes.strip_prefix(b"fLaC")?;
-    // The metadata blocks: STREAMINFO first, the others skipped by their lengths.
+    if bytes.len() < 42 || rest[0] & 0x7f != 0 || u32::from_be_bytes([0, rest[1], rest[2], rest[3]]) != 34 {
+        return None;
+    }
+    let (rate, channels, bits, total) = fixed_fields(&rest[4..38]);
+    Some(Info { rate, channels, bits, total })
+}
+
+/// The interleaved samples of a FLAC stream of 16-bit samples, its channels and rate as STREAMINFO
+/// gives them, and at most `max_frames` frames: the damage section 9 lists, a stream that isn't 16
+/// bits, or one of more frames than that, is `None`. A cue's file (OMQ section 4) is read this way,
+/// with no sample record to say what it holds.
+pub fn decode_stream(bytes: &[u8], max_frames: u32) -> Option<Vec<i16>> {
+    let (info, data) = header(bytes)?;
+    if info.bits != 16 {
+        return None;
+    }
+    body(data, &info, max_frames as usize * info.channels as usize)
+}
+
+/// STREAMINFO and the stream's frames: the metadata blocks, STREAMINFO first and the others
+/// skipped by their lengths.
+fn header(bytes: &[u8]) -> Option<(StreamInfo, &[u8])> {
+    let rest = bytes.strip_prefix(b"fLaC")?;
     let (mut at, mut info) = (0, None);
     loop {
         let header = rest.get(at..at + 4)?;
@@ -35,13 +87,14 @@ pub fn decode(bytes: &[u8], channels: u32, frames: u32) -> Option<Vec<i16>> {
             break;
         }
     }
-    let info = info?;
-    if info.channels != channels || info.bits != 16 {
-        return None;
-    }
-    let data = &rest[at..];
-    let want = frames as usize * channels as usize;
-    let mut out = Vec::with_capacity(want);
+    Some((info?, &rest[at..]))
+}
+
+/// The frames of a stream, `data`, as the samples of `info.channels` channels, at most `want` of
+/// them in all.
+fn body(data: &[u8], info: &StreamInfo, want: usize) -> Option<Vec<i16>> {
+    let channels = info.channels;
+    let mut out = Vec::with_capacity(want.min(1 << 20));
     let (mut pos, mut strategy, mut index) = (0, None, 0u64);
     while pos < data.len() {
         // The frames before this one, and the samples of a channel before it: what its coded
@@ -67,11 +120,12 @@ pub fn decode(bytes: &[u8], channels: u32, frames: u32) -> Option<Vec<i16>> {
     if info.total != 0 && info.total != decoded {
         return None;
     }
-    (out.len() == want).then_some(out)
+    Some(out)
 }
 
 /// What section 9 reads of STREAMINFO.
 struct StreamInfo {
+    rate: u32,
     /// The minimum and maximum block sizes: every frame's is within them, the last one's at most
     /// the maximum (RFC 9639 section 8.2).
     min_block: usize,
@@ -92,14 +146,20 @@ impl StreamInfo {
         if min < 16 || min > max {
             return None;
         }
-        Some(StreamInfo {
-            min_block: min as usize,
-            max_block: max as usize,
-            channels: ((b[12] >> 1) & 7) as u32 + 1,
-            bits: (((b[12] & 1) << 4) | (b[13] >> 4)) as u32 + 1,
-            total: ((b[13] & 0x0f) as u64) << 32 | u32::from_be_bytes([b[14], b[15], b[16], b[17]]) as u64,
-        })
+        let (rate, channels, bits, total) = fixed_fields(b);
+        Some(StreamInfo { rate, min_block: min as usize, max_block: max as usize, channels, bits, total })
     }
+}
+
+/// STREAMINFO's sample rate, channels, bits per sample and total samples (RFC 9639 section 8.2),
+/// from its 34 bytes.
+fn fixed_fields(b: &[u8]) -> (u32, u32, u32, u64) {
+    (
+        (b[10] as u32) << 12 | (b[11] as u32) << 4 | (b[12] >> 4) as u32,
+        ((b[12] >> 1) & 7) as u32 + 1,
+        (((b[12] & 1) << 4) | (b[13] >> 4)) as u32 + 1,
+        ((b[13] & 0x0f) as u64) << 32 | u32::from_be_bytes([b[14], b[15], b[16], b[17]]) as u64,
+    )
 }
 
 /// CRC-8 of a frame header (RFC 9639 section 9.1.8): polynomial x^8 + x^2 + x + 1, initial 0.

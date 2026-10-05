@@ -1,11 +1,18 @@
-//! Keyboard to logical controller. Arrows are the D-pad, Z is A, X is B.
-//! `Ctrl+1` to `Ctrl+4` are host hotkeys for the window scale and never
-//! reach the cart. On the Miyoo Mini the buttons arrive as keys too,
-//! from the fork's Mini video driver, and [`Layout::Handheld`] reads
-//! them: A is Space, B is Left Ctrl, Menu is Escape.
+//! Keyboard to logical controller. Which key of a desktop keyboard is
+//! which button is every host's to share (`kuula_host_common::controls`):
+//! the arrows, Z, X, C and V for A, B, X and Y, and so on. `Ctrl+1` to
+//! `Ctrl+4` are host hotkeys for the window scale and never reach the
+//! cart. On the Miyoo Mini the buttons arrive as keys too, from the
+//! fork's Mini video driver, and [`Layout::Handheld`] reads them: A is
+//! Space, B is Left Ctrl, Menu is Escape, and the rest are in
+//! [`Layout::button_bit`].
 
-use kuula_core::input::{BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_MENU, BTN_RIGHT, BTN_UP};
+use kuula_core::input::{
+    BTN_A, BTN_B, BTN_DOWN, BTN_L1, BTN_L2, BTN_LEFT, BTN_MENU, BTN_R1, BTN_R2, BTN_RIGHT,
+    BTN_SELECT, BTN_START, BTN_UP, BTN_X, BTN_Y,
+};
 use kuula_core::FrameInput;
+use kuula_host_common::controls::Key;
 use sdl2::keyboard::{Keycode, Mod};
 
 /// Which physical keys stand for the buttons.
@@ -25,27 +32,55 @@ impl Layout {
     }
 
     /// The `FrameInput` bit for a key, if it is mapped.
-    pub fn button_bit(self, key: Keycode) -> Option<u8> {
-        match (self, key) {
-            // Left Ctrl is a modifier on a desktop: Ctrl+1 to Ctrl+4 would
-            // press B on the way.
-            (Layout::Handheld, Keycode::Space) => Some(BTN_A),
-            (Layout::Handheld, Keycode::LCtrl) => Some(BTN_B),
-            _ => button_bit(key),
+    pub fn button_bit(self, key: Keycode) -> Option<u16> {
+        match self {
+            Layout::Desktop => desktop_key(key).map(Key::button),
+            Layout::Handheld => handheld_bit(key),
         }
     }
 }
 
-/// The `FrameInput` bit for a key on the desktop layout, if it is mapped.
-pub fn button_bit(key: Keycode) -> Option<u8> {
+/// The key of a desktop keyboard an SDL key code is, of those that are
+/// buttons.
+fn desktop_key(key: Keycode) -> Option<Key> {
+    Some(match key {
+        Keycode::Up => Key::Up,
+        Keycode::Down => Key::Down,
+        Keycode::Left => Key::Left,
+        Keycode::Right => Key::Right,
+        Keycode::Z => Key::Z,
+        Keycode::X => Key::X,
+        Keycode::C => Key::C,
+        Keycode::V => Key::V,
+        Keycode::A => Key::A,
+        Keycode::S => Key::S,
+        Keycode::Q => Key::Q,
+        Keycode::W => Key::W,
+        Keycode::Return => Key::Enter,
+        Keycode::RShift => Key::RightShift,
+        Keycode::Escape => Key::Escape,
+        _ => return None,
+    })
+}
+
+/// The keys the Miyoo Mini's video driver sends for the device's buttons.
+fn handheld_bit(key: Keycode) -> Option<u16> {
     match key {
         Keycode::Up => Some(BTN_UP),
         Keycode::Down => Some(BTN_DOWN),
         Keycode::Left => Some(BTN_LEFT),
         Keycode::Right => Some(BTN_RIGHT),
-        Keycode::Z => Some(BTN_A),
-        Keycode::X => Some(BTN_B),
         Keycode::Escape => Some(BTN_MENU),
+        Keycode::Space => Some(BTN_A),
+        Keycode::LCtrl => Some(BTN_B),
+        Keycode::LShift => Some(BTN_X),
+        Keycode::LAlt => Some(BTN_Y),
+        Keycode::E => Some(BTN_L1),
+        Keycode::T => Some(BTN_R1),
+        Keycode::Tab => Some(BTN_L2),
+        Keycode::Backspace => Some(BTN_R2),
+        Keycode::Return => Some(BTN_START),
+        Keycode::RCtrl => Some(BTN_SELECT),
         _ => None,
     }
 }
@@ -67,7 +102,7 @@ pub fn scale_hotkey(key: Keycode, keymod: Mod) -> Option<u32> {
 /// Held buttons, updated from key events, sampled once per frame.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct KeyState {
-    buttons: u8,
+    buttons: u16,
     layout: Layout,
 }
 
@@ -106,6 +141,14 @@ mod tests {
             (Keycode::Right, BTN_RIGHT),
             (Keycode::Z, BTN_A),
             (Keycode::X, BTN_B),
+            (Keycode::C, BTN_X),
+            (Keycode::V, BTN_Y),
+            (Keycode::A, BTN_L1),
+            (Keycode::S, BTN_R1),
+            (Keycode::Q, BTN_L2),
+            (Keycode::W, BTN_R2),
+            (Keycode::Return, BTN_START),
+            (Keycode::RShift, BTN_SELECT),
         ];
         for (key, bit) in cases {
             let mut s = KeyState::default();
@@ -120,16 +163,19 @@ mod tests {
     fn unmapped_keys_are_ignored() {
         let mut s = KeyState::default();
         for key in [
-            Keycode::A,
+            Keycode::D,
             Keycode::Space,
-            Keycode::Return,
+            Keycode::Tab,
             Keycode::Num1,
             Keycode::LCtrl,
+            Keycode::LShift,
         ] {
             s.press(key);
         }
         assert_eq!(s.input(), FrameInput::NONE);
-        assert_eq!(button_bit(Keycode::Escape), Some(BTN_MENU));
+        for layout in [Layout::Desktop, Layout::Handheld] {
+            assert_eq!(layout.button_bit(Keycode::Escape), Some(BTN_MENU));
+        }
     }
 
     #[test]
@@ -142,6 +188,31 @@ mod tests {
         assert_eq!(s.input().buttons, BTN_A | BTN_B | BTN_MENU | BTN_LEFT);
         s.release(Keycode::Space);
         assert_eq!(s.input().buttons, BTN_B | BTN_MENU | BTN_LEFT);
+    }
+
+    #[test]
+    fn the_handheld_layout_has_a_key_for_every_button() {
+        let cases = [
+            (Keycode::LShift, BTN_X),
+            (Keycode::LAlt, BTN_Y),
+            (Keycode::E, BTN_L1),
+            (Keycode::T, BTN_R1),
+            (Keycode::Tab, BTN_L2),
+            (Keycode::Backspace, BTN_R2),
+            (Keycode::Return, BTN_START),
+            (Keycode::RCtrl, BTN_SELECT),
+        ];
+        for (key, bit) in cases {
+            let mut s = KeyState::new(Layout::Handheld);
+            s.press(key);
+            assert_eq!(s.input(), FrameInput::new(bit), "{key:?}");
+        }
+        // The desktop's letters are not the device's.
+        let mut s = KeyState::new(Layout::Handheld);
+        for key in [Keycode::Z, Keycode::X, Keycode::C, Keycode::A, Keycode::Q] {
+            s.press(key);
+        }
+        assert_eq!(s.input(), FrameInput::NONE);
     }
 
     #[test]

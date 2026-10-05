@@ -1,22 +1,24 @@
 #!/bin/sh
 # Headless check of this build on the device, over SSH or from a terminal
-# app: no display, no audio, no SDL call. It runs the conformance oracles
-# and compares them with what the desktop build printed for the same
-# carts (probe.expected, written when the package was made), then prints
-# what the kernel says about memory. Everything goes to probe.log too.
+# app: no display, no audio, no SDL call, no network. It runs the
+# conformance oracles with each binary of the package and compares them
+# with what the desktop build printed for the same carts (probe.expected,
+# written when the package was made), then prints what the kernel says
+# about memory. Everything goes to probe.log too.
 #
-#   cd /mnt/SDCARD/Roms/PORTS/Games/Kuula && sh probe.sh
+#   cd /mnt/SDCARD/Emu/KUULA && sh probe.sh
 #
 # Exit status 0 when every check passed.
 
 mydir=$(cd "$(dirname "$0")" && pwd)
 cd "$mydir" || exit 1
 export HOME="$mydir"
-export XDG_DATA_HOME="$mydir/data"
+export XDG_DATA_HOME="$mydir/probe/data"
 export LD_LIBRARY_PATH="$mydir/libs:/config/lib:/customer/lib:/usr/miyoo/lib:$LD_LIBRARY_PATH"
-chmod +x ./kuula 2>/dev/null
+chmod +x ./kuula ./kuula-net 2>/dev/null
 
 out="$mydir/probe"
+carts="$mydir/probe-carts"
 rm -rf "$out"
 mkdir -p "$out"
 fail=0
@@ -39,29 +41,34 @@ check() {
 }
 
 {
-    echo "== kuula"
-    ./kuula --version
     echo "== memory before"
     grep -e MemTotal -e MemFree -e MemAvailable /proc/meminfo
 
-    echo "== conformance, 60 frames: per-frame hashes"
-    ./kuula run carts/conformance --headless --frames 60 --out "$out/conformance" > "$out/conformance.txt" 2>&1
-    if cmp -s "$out/conformance/hashes.txt" carts/conformance/hashes.txt; then
-        echo "PASS conformance hashes"
-    else
-        echo "FAIL conformance hashes"
-        diff "$out/conformance/hashes.txt" carts/conformance/hashes.txt | head -5
-        fail=1
-    fi
+    # The binary without networking, then the one with it.
+    for bin in kuula kuula-net; do
+        [ -f "./$bin" ] || continue
+        echo "== $bin"
+        "./$bin" --version
 
-    echo "== hello, 120 frames"
-    ./kuula run carts/hello --headless --frames 120 > "$out/hello.txt" 2>&1
-    check "hello summary" "$(tail -n 1 "$out/hello.txt")" "$(expected hello_summary)"
+        echo "== $bin: conformance, 60 frames: per-frame hashes"
+        "./$bin" run "$carts/conformance" --headless --frames 60 --out "$out/$bin-conformance" > "$out/$bin-conformance.txt" 2>&1
+        if cmp -s "$out/$bin-conformance/hashes.txt" "$carts/conformance/hashes.txt"; then
+            echo "PASS $bin conformance hashes"
+        else
+            echo "FAIL $bin conformance hashes"
+            diff "$out/$bin-conformance/hashes.txt" "$carts/conformance/hashes.txt" | head -5
+            fail=1
+        fi
 
-    echo "== numeric, 502 frames: 120000 lines of libm and formatting"
-    ./kuula run carts/numeric --headless --frames 502 > "$out/numeric.txt" 2>&1
-    check "numeric summary" "$(tail -n 1 "$out/numeric.txt")" "$(expected numeric_summary)"
-    check "numeric log" "$(sed '$d' "$out/numeric.txt" | md5sum | cut -d' ' -f1)" "$(expected numeric_log_md5)"
+        echo "== $bin: hello, 120 frames"
+        "./$bin" run "$carts/hello" --headless --frames 120 > "$out/$bin-hello.txt" 2>&1
+        check "$bin hello summary" "$(tail -n 1 "$out/$bin-hello.txt")" "$(expected hello_summary)"
+
+        echo "== $bin: numeric, 502 frames: 120000 lines of libm and formatting"
+        "./$bin" run "$carts/numeric" --headless --frames 502 > "$out/$bin-numeric.txt" 2>&1
+        check "$bin numeric summary" "$(tail -n 1 "$out/$bin-numeric.txt")" "$(expected numeric_summary)"
+        check "$bin numeric log" "$(sed '$d' "$out/$bin-numeric.txt" | md5sum | cut -d' ' -f1)" "$(expected numeric_log_md5)"
+    done
 
     echo "== memory after"
     grep -e MemTotal -e MemFree -e MemAvailable /proc/meminfo

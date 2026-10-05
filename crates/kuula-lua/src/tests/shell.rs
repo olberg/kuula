@@ -59,7 +59,7 @@ fn shell_console(carts: &[(&str, &str)]) -> Console {
     )
 }
 
-fn press(c: &mut Console, bits: u8) {
+fn press(c: &mut Console, bits: u16) {
     c.step(FrameInput::new(bits));
     c.step(FrameInput::NONE);
 }
@@ -94,7 +94,7 @@ fn steps(c: &mut Console, n: usize) {
     steps_with(c, 0, n);
 }
 
-fn steps_with(c: &mut Console, bits: u8, n: usize) {
+fn steps_with(c: &mut Console, bits: u16, n: usize) {
     for _ in 0..n {
         c.step(FrameInput::new(bits));
     }
@@ -476,4 +476,123 @@ fn ticket_entry_and_relay_menu_draw_without_shell_faults() {
     press(&mut c, BTN_A); // relay entry
     steps(&mut c, 2);
     assert!(c.shell_fault().is_none(), "{:?}", c.shell_fault());
+}
+
+#[test]
+fn a_shell_on_one_cart_opens_it_at_once_and_quitting_ends_the_host() {
+    use kuula_core::input::BTN_DOWN;
+    let mut c = shell_console(&[("hello", HELLO)]);
+    c.set_single_cart(true);
+    steps(&mut c, 3);
+    assert!(c.shell_fault().is_none(), "{:?}", c.shell_fault());
+    assert!(c.frame() > 0, "the cart runs with no button pressed");
+    assert!(!c.take_host_requests().contains(&SysRequest::Exit));
+    // Menu, three down, A: the item that is "quit to shell" with a list.
+    press(&mut c, BTN_MENU);
+    assert!(c.is_paused());
+    for _ in 0..3 {
+        press(&mut c, BTN_DOWN);
+    }
+    c.step(FrameInput::new(BTN_A));
+    assert!(c.take_host_requests().contains(&SysRequest::Exit));
+    assert!(c.shell_fault().is_none(), "{:?}", c.shell_fault());
+
+    // B on the error screen of a cart that died is the way out too.
+    let mut c = shell_console(&[("dies", DIES)]);
+    c.set_single_cart(true);
+    steps(&mut c, 8);
+    assert!(c.state().fault().is_some());
+    assert!(!c.take_host_requests().contains(&SysRequest::Exit));
+    c.step(FrameInput::new(BTN_B));
+    assert!(c.take_host_requests().contains(&SysRequest::Exit));
+
+    // A shell with a list never asks to end.
+    let mut c = shell_console(&[("hello", HELLO)]);
+    boot_and_run(&mut c);
+    press(&mut c, BTN_MENU);
+    for _ in 0..3 {
+        press(&mut c, BTN_DOWN);
+    }
+    press(&mut c, BTN_A);
+    assert_eq!(c.frame(), 0, "back on the list");
+    assert!(!c.take_host_requests().contains(&SysRequest::Exit));
+}
+
+#[test]
+fn a_developer_waiting_for_approval_is_put_to_the_person() {
+    use kuula_core::shell::DevAction;
+    let id = "0123456789abcdef".repeat(4);
+    // What the host does when its receiver has refused a developer.
+    let ask = |c: &mut Console| {
+        let view = c.dev_view_mut().unwrap();
+        view.active = true;
+        view.pending = id.clone();
+        view.cart = "hello".into();
+        view.bytes = 736;
+        view.from = "192.0.2.5".into();
+    };
+    let answers = |c: &mut Console| -> Vec<SysRequest> {
+        c.take_host_requests()
+            .into_iter()
+            .filter(|r| matches!(r, SysRequest::Dev(_)))
+            .collect()
+    };
+
+    // Over a running cart: the cart waits while the question is up.
+    let mut c = shell_console(&[("hello", HELLO)]);
+    boot_and_run(&mut c);
+    assert!(!c.is_paused());
+    ask(&mut c);
+    steps(&mut c, 2);
+    assert!(c.is_paused(), "the cart waits while the question is up");
+    assert!(c.output().screen.contains(&15), "the id is drawn");
+    // A tapped as in a game answers nothing, at once or later.
+    for _ in 0..80 {
+        press(&mut c, BTN_A);
+    }
+    assert_eq!(answers(&mut c), []);
+    // A pressed after the first second and a half and held for a second
+    // approves, and not a frame before.
+    steps_with(&mut c, BTN_A, 59);
+    assert_eq!(answers(&mut c), []);
+    c.step(FrameInput::new(BTN_A));
+    assert_eq!(answers(&mut c), [SysRequest::Dev(DevAction::Approve)]);
+    // The host takes the question away with the answer.
+    c.dev_view_mut().unwrap().pending.clear();
+    steps(&mut c, 2);
+    assert!(!c.is_paused(), "the cart goes on");
+    assert!(c.shell_fault().is_none(), "{:?}", c.shell_fault());
+
+    // A that was already held when the question came up never approves.
+    let mut c = shell_console(&[("hello", HELLO)]);
+    boot_and_run(&mut c);
+    steps_with(&mut c, BTN_A, 5);
+    ask(&mut c);
+    steps_with(&mut c, BTN_A, 400);
+    assert_eq!(answers(&mut c), []);
+
+    // From the list: B refuses, once the first second and a half is over,
+    // and the list is back.
+    let mut c = shell_console(&[("hello", HELLO)]);
+    steps(&mut c, 2);
+    press(&mut c, BTN_A);
+    ask(&mut c);
+    steps(&mut c, 2);
+    press(&mut c, BTN_B);
+    assert_eq!(answers(&mut c), [], "too soon to be meant");
+    steps(&mut c, 95);
+    c.step(FrameInput::new(BTN_B));
+    assert_eq!(answers(&mut c), [SysRequest::Dev(DevAction::Refuse)]);
+    c.dev_view_mut().unwrap().pending.clear();
+    steps(&mut c, 2);
+    press(&mut c, BTN_A);
+    assert!(c.frame() > 0, "A on the list runs the cart again");
+    assert!(c.shell_fault().is_none(), "{:?}", c.shell_fault());
+
+    // A shell with no receiver is never asked, whatever the view holds.
+    let mut c = shell_console(&[("hello", HELLO)]);
+    boot_and_run(&mut c);
+    c.dev_view_mut().unwrap().pending = id.clone();
+    steps(&mut c, 3);
+    assert!(!c.is_paused());
 }

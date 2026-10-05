@@ -28,12 +28,16 @@ pub struct DeployRequest {
     pub name: String,
     /// The cart as the other tools read it, bounded by the usual limits.
     pub snapshot: Snapshot,
-    /// The receiver's ticket.
+    /// The receiver's ticket, or an adb target (`adb`, `adb:<serial>`).
     pub to: String,
+    /// Also bring back a picture of the device's screen, where the
+    /// transport can take one (adb).
+    pub screenshot: bool,
 }
 
 /// What a receiver reported; every field but `name`, `bytes` and
 /// `digest` is the receiver's word and untrusted text.
+#[derive(Default)]
 pub struct DeployOutcome {
     pub name: String,
     pub bytes: u64,
@@ -48,6 +52,11 @@ pub struct DeployOutcome {
     pub install: String,
     /// `started`, `faulted`, `not_run` or `timeout`.
     pub restart: String,
+    /// The receiving app's log since it started on the cart, where the
+    /// transport can read one (adb); empty otherwise.
+    pub log: Vec<String>,
+    /// The device's screen as a PNG, when asked for and taken.
+    pub screenshot: Option<Vec<u8>>,
 }
 
 /// Pushes a cart to a receiver; injected by the binary like the

@@ -6,6 +6,9 @@
 -- Screens: boot, the cart list, the pause overlay, settings and the
 -- error screen. D-pad, A (Z) and B (X) only; Menu (Escape) toggles the
 -- pause overlay while a cart runs.
+--
+-- Started on one cart (`sys.single()`), the shell opens that cart at once
+-- and ends the host where it would have shown its list.
 
 local W, H = 320, 240
 -- The system font cell. Glyphs are 8 wide in both faces; the height is
@@ -32,6 +35,15 @@ local last_fault = nil
 local net_index, nearby_index, text_index = 1, 1, 1
 local net_managed = false
 local text_kind = "ticket"
+local single = nil
+-- Where the question about a developer came up, and whether it paused
+-- the cart; how long it has been up, and how long A has been held on it.
+local dev_return, dev_paused = "list", false
+local dev_frames, dev_hold = 0, 0
+-- The question takes no answer for a second and a half, and approving is
+-- A pressed after that and held for a second: a button that was being
+-- tapped or held in a game when the question came up answers nothing.
+local DEV_WAIT, DEV_HOLD = 90, 60
 local NET_ITEMS = { "host game", "join with ticket", "nearby sessions", "relay URL", "relay-only", "LAN discovery", "networking", "play offline", "back" }
 local CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ:/.-_?=&%+@[]"
 local TEXT_KEYS = {}
@@ -86,11 +98,34 @@ end
 
 -- Boot ---------------------------------------------------------------
 
+-- A on the list: a cart that uses the network gets the multiplayer
+-- screen first, any other starts.
+local function open_selected()
+  local cart = sys.carts()[list_index]
+  if not cart then return end
+  if cart.network then
+    sys.net_action("browse", cart.name)
+    sys.net_action("overlay", "", true)
+    net_index = 1
+    screen = "network"
+  else
+    net_managed = false
+    sys.run(cart.name)
+    screen = "cart"
+  end
+  reset_edges()
+end
+
 local function update_boot()
   boot_frames = boot_frames + 1
   -- Sample both buttons every frame so their edge state is current.
   local a, b = pressed(4), pressed(5)
-  if a or b then
+  if single then
+    -- No title to wait on: the one cart opens, and a list without it
+    -- is the end.
+    screen = "list"
+    open_selected()
+  elseif a or b then
     screen = "list"
     reset_edges()
   end
@@ -120,17 +155,7 @@ local function update_list()
     screen = "info"
     reset_edges()
   elseif pressed(4) and carts[list_index] then
-    if carts[list_index].network then
-      sys.net_action("browse", carts[list_index].name)
-      sys.net_action("overlay", "", true)
-      net_index = 1
-      screen = "network"
-    else
-      net_managed = false
-      sys.run(carts[list_index].name)
-      screen = "cart"
-    end
-    reset_edges()
+    open_selected()
   end
 end
 
@@ -142,6 +167,10 @@ local function draw_list_screen()
     print("no carts found in carts/", CW, 3 * CH, TEXT)
   else
     draw_list(carts, list_index, 3 * CW, 3 * CH, function(c) return c.title end)
+  end
+  if sys.dev_state() > 0 then
+    print("development receiver on", CW, H - 4 * CH, HILITE)
+    print(sys.dev().note:sub(1, (W - 2 * CW) // CW), CW, H - 4 * CH + LH, DIM)
   end
   print("A run    B info", CW, H - CH - CH // 2, DIM)
 end
@@ -256,7 +285,11 @@ local function draw_pause()
   local items = {}
   for i = 1, (net_managed and #MENU_ITEMS or #MENU_ITEMS - 1) do items[i] = MENU_ITEMS[i] end
   local x0, y0 = menu_panel("paused", 17, #items + 2)
-  draw_list(items, menu_index, x0 + 3 * CW, y0 + CH // 2 + 2 * LH)
+  draw_list(items, menu_index, x0 + 3 * CW, y0 + CH // 2 + 2 * LH, function(item)
+    -- With one cart there is no list to go back to.
+    if single and item == "quit to shell" then return "quit" end
+    return item
+  end)
 end
 
 local function update_settings()
@@ -365,8 +398,65 @@ local function draw_error()
   print("A restart   B quit", margin + 6, H - margin - CH - CH // 2, HILITE)
 end
 
--- Dispatch -----------------------------------------------------------
+-- A developer asking for approval ------------------------------------
 
+-- The receiver refused a developer nobody has approved; the person
+-- holding the device says whether the next attempt is let in.
+local function update_dev()
+  dev_frames = dev_frames + 1
+  local a, b = pressed(4), pressed(5)
+  local answer
+  if dev_frames <= DEV_WAIT then
+    dev_hold = 0
+  elseif b then
+    answer = "refuse"
+  elseif not btn(4) then
+    dev_hold = 0
+  elseif a then
+    dev_hold = 1
+  elseif dev_hold > 0 then
+    dev_hold = dev_hold + 1
+    if dev_hold >= DEV_HOLD then answer = "approve" end
+  end
+  if not answer then return end
+  sys.dev_action(answer)
+  if dev_paused then sys.paused(false) end
+  screen = dev_return
+  reset_edges()
+end
+
+local function draw_dev()
+  if sys.running() then cls(0) else cls(PANEL) end
+  local d = sys.dev()
+  -- What the sender says it brings; it is its claim until it is approved.
+  local what = d.cart ~= "" and (d.cart .. ", " .. d.bytes .. " bytes") or "it did not say"
+  local lines = {
+    { "A computer asks to send carts", TEXT },
+    { "to this device.", TEXT },
+    { "", TEXT },
+    { "cart  " .. what:sub(1, 26), HILITE },
+    { "from  " .. (d.from ~= "" and d.from or "unknown"):sub(1, 26), HILITE },
+    { "id    " .. d.pending:sub(1, 16), CODE },
+    { "      " .. d.pending:sub(17, 32), CODE },
+    { "      " .. d.pending:sub(33, 48), CODE },
+    { "      " .. d.pending:sub(49, 64), CODE },
+    { "", TEXT },
+    { "Approve your own computer only:", TEXT },
+    { "`kuula deploy id` prints its id.", TEXT },
+    { "", TEXT },
+    { dev_frames <= DEV_WAIT and "..." or "hold A: approve    B: refuse", HILITE },
+  }
+  local x0, y0 = menu_panel("development", 36, #lines + 3)
+  local x, y = x0 + 2 * CW, y0 + CH // 2 + 2 * LH
+  for i, line in ipairs(lines) do
+    print(line[1], x, y + (i - 1) * LH, line[2])
+  end
+  -- How far the hold has got.
+  if dev_hold > 0 then
+    local w = 32 * CW * dev_hold // DEV_HOLD
+    rectfill(x, y + #lines * LH + 2, x + w, y + #lines * LH + 4, HILITE)
+  end
+end
 
 -- Multiplayer --------------------------------------------------------
 local function network_back()
@@ -577,6 +667,7 @@ local screens = {
   net_text = { update_net_text, draw_net_text },
   nearby = { update_nearby, draw_nearby },
   connecting = { update_connecting, draw_connecting },
+  dev = { update_dev, draw_dev },
 }
 
 function _update(dt)
@@ -585,6 +676,7 @@ function _update(dt)
   local w, h = stat("width"), stat("height")
   if w and h then W, H = w, h end
   set_font(stat("font"))
+  if single == nil then single = sys.single() end
   -- The host can start a cart itself (a development deploy): whatever
   -- the shell was showing, it shows that cart. A network screen held
   -- the overlay, which keeps the buttons from the cart.
@@ -602,7 +694,25 @@ function _update(dt)
     screen = "error"
     reset_edges()
   end
+  -- A developer waiting for an answer comes before whatever was shown,
+  -- and a running cart waits meanwhile.
+  local asking = sys.dev_state() == 2
+  if screen ~= "dev" and asking then
+    dev_return = screen
+    dev_paused = screen == "cart"
+    if dev_paused then sys.paused(true) end
+    dev_frames, dev_hold = 0, 0
+    screen = "dev"
+    reset_edges()
+  elseif screen == "dev" and not asking then
+    -- Answered elsewhere, or the receiver is gone: nothing to ask.
+    if dev_paused then sys.paused(false) end
+    screen = dev_return
+    reset_edges()
+  end
   screens[screen][1]()
+  -- With one cart, the list is the way out.
+  if single and screen == "list" then sys.exit() end
 end
 
 function _draw()

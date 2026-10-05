@@ -6,6 +6,7 @@
 //! Keys holding cart-provided text, cleaned but untrusted: `title`,
 //! `log[].text`, `fault.message`, `state.text`, `errors[].message`.
 
+use kuula_core::input::{BUTTON_NAMES, CART_BUTTONS};
 use kuula_core::net::NetEnv;
 use kuula_core::transcript::{Transcript, MAX_FILE_BYTES};
 use kuula_core::{Category, Fault, FrameInput, FrameProfile};
@@ -78,15 +79,25 @@ fn console_prop() -> Value {
     json!({"type": "string", "description": "Console handle returned by run, e.g. \"c1\"."})
 }
 
+/// Every button's bit beside its name: "1 up, 2 down" and so on.
+fn button_bits() -> String {
+    let bits: Vec<String> = BUTTON_NAMES
+        .iter()
+        .enumerate()
+        .map(|(n, name)| format!("{} {name}", 1u32 << n))
+        .collect();
+    bits.join(", ")
+}
+
 fn input_script_schema() -> Value {
     json!({
         "type": "array",
-        "description": "Input script: a list of runs, each {\"frames\": n, \"buttons\": [names]}. Button names: up, down, left, right, a, b. Missing frames default to 1, missing buttons to none. Frame i of the step takes run-expanded entry i; entries past the end are no input.",
+        "description": format!("Input script: a list of runs, each {{\"frames\": n, \"buttons\": [names]}}. Button names: {}. Missing frames default to 1, missing buttons to none. Frame i of the step takes run-expanded entry i; entries past the end are no input.", BUTTON_NAMES.join(", ")),
         "items": {
             "type": "object",
             "properties": {
                 "frames": {"type": "integer", "minimum": 0},
-                "buttons": {"type": "array", "items": {"type": "string", "enum": ["up", "down", "left", "right", "a", "b"]}}
+                "buttons": {"type": "array", "items": {"type": "string", "enum": BUTTON_NAMES}}
             },
             "additionalProperties": false
         }
@@ -122,7 +133,7 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "run",
-            format!("Start a headless console for a cart and step `frames` frames (default {DEFAULT_RUN_FRAMES}, max {MAX_FRAMES_PER_CALL}) with no input. Returns {{console, frame, width, height, title, running, fault?}}. At most {} consoles are live at once (error too_many_consoles); stop them when done. Headless consoles use an in-memory save store. With `record`, every input the cart sees is kept and `stop` returns the transcript (format `kuula-transcript 1`, see api.md), which `replay` and `kuula run --replay` reproduce frame for frame.{UNTRUSTED}", crate::MAX_CONSOLES),
+            format!("Start a headless console for a cart and step `frames` frames (default {DEFAULT_RUN_FRAMES}, max {MAX_FRAMES_PER_CALL}) with no input. Returns {{console, frame, width, height, buttons, title, running, fault?}}; `buttons` is what the cart's manifest declares, \"two\" (the D-pad, A and B) or \"all\", and a button outside it always reads as released. At most {} consoles are live at once (error too_many_consoles); stop them when done. Headless consoles use an in-memory save store. With `record`, every input the cart sees is kept and `stop` returns the transcript (format `kuula-transcript 1`, see api.md), which `replay` and `kuula run --replay` reproduce frame for frame.{UNTRUSTED}", crate::MAX_CONSOLES),
             json!({
                 "cart": {"type": "string", "description": "Cart directory, relative to the server root."},
                 "frames": {"type": "integer", "minimum": 0, "maximum": MAX_FRAMES_PER_CALL},
@@ -155,10 +166,10 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "input",
-            "Queue per-frame button masks for later `step` calls that carry no input of their own. Bits: 1 up, 2 down, 4 left, 8 right, 16 a, 32 b. Does not advance frames. Returns {console, queued, frame}.".to_string(),
+            format!("Queue per-frame button masks for later `step` calls that carry no input of their own. Bits: {}. Does not advance frames. Returns {{console, queued, frame}}.", button_bits()),
             json!({
                 "console": console_prop(),
-                "frames": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 63}, "description": "One mask per frame, in order."}
+                "frames": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": CART_BUTTONS}, "description": "One mask per frame, in order."}
             }),
             &["console", "frames"],
         ),
@@ -203,10 +214,11 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "deploy",
-            format!("Push a cart directory to another desktop's development receiver (`kuula shell --dev-receiver` or `kuula deploy receive`) over Iroh and return what happened. `to` is the receiver's ticket. The cart is read like the other tools read it, packed the way `kuula build` packs it and sent as `<directory name>.cart`; the directory name must be 1 to 32 characters of a-z, 0-9, `_` and `-`. The receiver must have approved this installation's development id (`kuula deploy id` prints it, `kuula deploy approve <id>` approves it there). Returns {{name, bytes, digest, ok, code, detail, transfer, validation, install, restart}}: transfer, validation and install are `ok`, `failed` or `skipped`, `restart` is `started`, `faulted` (detail carries the fault code), `not_run` (a receiver with no console) or `timeout`; `code` is `deploy_ok` or why the receiver refused (`deploy_digest`, `deploy_invalid` with the core's own error code and path in `detail`, `deploy_interrupted`, `deploy_install`, `deploy_too_large`, `deploy_offer`, `deploy_cancelled`). A receiver that is busy, has not approved this installation, or cannot be reached is a tool error with `deploy_busy`, `deploy_unpaired` or a `net_*` code; a server started without networking answers `deploy_unavailable`. The call blocks until the receiver answers, within the protocol's deadlines (5 s to connect, 5 s for the answer, 5 s per stalled write, 15 s for the result). Direct addresses only: no relay is configured here. `detail` is the receiver's text and untrusted.{UNTRUSTED}"),
+            format!("Push a cart directory to another desktop's development receiver (`kuula shell --dev-receiver` or `kuula deploy receive`) over Iroh, or to the Kuula app on an Android device over adb, and return what happened. `to` is the receiver's ticket, or an adb target (see below). The cart is read like the other tools read it, packed the way `kuula build` packs it and sent as `<directory name>.cart`; the directory name must be 1 to 32 characters of a-z, 0-9, `_` and `-`. The receiver must have approved this installation's development id (`kuula deploy id` prints it, `kuula deploy approve <id>` approves it there). Returns {{name, bytes, digest, ok, code, detail, transfer, validation, install, restart, log, screenshot}}: transfer, validation and install are `ok`, `failed` or `skipped`, `restart` is `started`, `faulted` (detail carries the fault code), `not_run` (a receiver with no console) or `timeout`; `code` is `deploy_ok` or why the receiver refused (`deploy_digest`, `deploy_invalid` with the core's own error code and path in `detail`, `deploy_interrupted`, `deploy_install`, `deploy_too_large`, `deploy_offer`, `deploy_cancelled`). A receiver that is busy, has not approved this installation, or cannot be reached is a tool error with `deploy_busy`, `deploy_unpaired` or a `net_*` code; a server started without networking answers `deploy_unavailable`. The call blocks until the receiver answers, within the protocol's deadlines (5 s to connect, 5 s for the answer, 5 s per stalled write, 15 s for the result). Direct addresses only: no relay is configured here. With `to` set to `adb` (the one Android device adb sees) or `adb:<serial>`, the cart goes to the Kuula app on that device instead: adb pushes it into the directory the app lists a person's own carts from, as `<directory name>.cart`, the app is started on it, and `restart` is what the app's log says after half a second of the cart: `started`, `faulted` (the fault is in `detail`), `not_run`, or `timeout` when the app said nothing in 12 s, which is what a locked or sleeping device gives. `log` is the app's log for that run, where the cart's own `print` lines begin with `cart: `; with `screenshot: true` the device's screen comes back as an image when Kuula is in front, and `screenshot` says whether it did. This needs the adb program (on the search path, in the Android SDK, or named by the KUULA_ADB environment variable), a device that allows debugging from this computer and the app installed on it: `adb_unavailable`, `adb_no_device`, `adb_no_app` and `adb_failed` are tool errors. Nothing is asked on the device: allowing adb debugging from this computer is the approval, and it works in a server without networking. `detail` and `log` are the receiver's text and untrusted.{UNTRUSTED}"),
             json!({
                 "cart": {"type": "string", "description": "Cart directory, relative to the server root."},
-                "to": {"type": "string", "description": "The receiver's ticket, as printed by `kuula deploy receive` or `kuula shell --dev-receiver`."}
+                "to": {"type": "string", "description": "The receiver's ticket, as printed by `kuula deploy receive` or `kuula shell --dev-receiver`; or `adb` or `adb:<serial>` for the Kuula app on an Android device."},
+                "screenshot": {"type": "boolean", "description": "With an adb target: also return the device's screen as an image, when Kuula is in front there. Default false."}
             }),
             &["cart", "to"],
         ),
@@ -427,6 +439,7 @@ fn run(session: &mut Session, args: &Map<String, Value>) -> Result<ToolOutput, T
     let title = clean_text(&console.manifest().title);
     let author = clean_text(&console.manifest().author);
     let license = console.manifest().license.clone();
+    let buttons = console.manifest().buttons.name();
     let (w, h) = console.screen_mode().size();
     let handle = session.open_with(console, recorder, link)?;
     let live = session.get(&handle)?;
@@ -443,6 +456,7 @@ fn run(session: &mut Session, args: &Map<String, Value>) -> Result<ToolOutput, T
         "frames_run": steps.len(),
         "width": w,
         "height": h,
+        "buttons": buttons,
         "running": running,
         "fault": fault,
         "recording": record,
@@ -559,9 +573,13 @@ fn input(session: &mut Session, args: &Map<String, Value>) -> Result<ToolOutput,
     for m in masks {
         let bits = m
             .as_u64()
-            .filter(|&b| b <= 63)
-            .ok_or_else(|| invalid("each mask must be an integer from 0 to 63"))?;
-        inputs.push(FrameInput::new(bits as u8));
+            .filter(|&b| b <= CART_BUTTONS as u64)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "each mask must be an integer from 0 to {CART_BUTTONS}"
+                ))
+            })?;
+        inputs.push(FrameInput::new(bits as u16));
     }
     let live = session.get(handle)?;
     let queued = live.queue_inputs(&inputs)?;

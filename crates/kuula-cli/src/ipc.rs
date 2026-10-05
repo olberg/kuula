@@ -145,6 +145,9 @@ impl Writer {
     fn u8(&mut self, v: u8) {
         self.0.push(v);
     }
+    fn u16(&mut self, v: u16) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
     fn u32(&mut self, v: u32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
@@ -252,7 +255,7 @@ pub fn encode(msg: &Message) -> Vec<u8> {
         }
         Message::Step { input, events } => {
             w.u8(TAG_STEP);
-            w.u8(input.buttons);
+            w.u16(input.buttons);
             w.events(events);
         }
         Message::Stop => w.u8(TAG_STOP),
@@ -336,6 +339,9 @@ impl<'a> Reader<'a> {
     }
     fn u8(&mut self) -> Result<u8, ProtoError> {
         Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16, ProtoError> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
     fn u32(&mut self) -> Result<u32, ProtoError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
@@ -496,7 +502,7 @@ pub fn decode(body: &[u8]) -> Result<Message, ProtoError> {
             }
         }
         TAG_STEP => {
-            let input = FrameInput::new(r.u8()?);
+            let input = FrameInput::new(r.u16()?);
             let events = r.events()?;
             Message::Step { input, events }
         }

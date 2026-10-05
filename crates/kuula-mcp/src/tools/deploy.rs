@@ -1,8 +1,10 @@
 //! `deploy`: push a cart directory to another desktop's development
-//! receiver. This crate opens no socket: the binary injects the push
-//! (`DeployFn`), and without it the tool answers `deploy_unavailable`.
+//! receiver, or to the Kuula app on an Android device over `adb`. This
+//! crate opens no socket and starts no program: the binary injects the
+//! push (`DeployFn`), and without it the tool answers
+//! `deploy_unavailable`.
 
-use super::{arg_str, invalid, ToolOutput};
+use super::{arg_str, base64, invalid, ToolOutput};
 use crate::session::{clean_text, DeployRequest, Session, ToolError};
 use serde_json::{json, Map, Value};
 
@@ -18,6 +20,11 @@ pub(super) fn run(
             kuula_core::net::MAX_TICKET
         )));
     }
+    let screenshot = match args.get("screenshot") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(on)) => *on,
+        Some(_) => return Err(invalid("screenshot must be a boolean")),
+    };
     let push = session.deploy_fn().ok_or_else(|| {
         ToolError::new(
             "deploy_unavailable",
@@ -35,8 +42,10 @@ pub(super) fn run(
         name,
         snapshot,
         to: to.to_string(),
+        screenshot,
     })?;
-    Ok(ToolOutput::json(json!({
+    let log: Vec<String> = out.log.iter().map(|line| clean_text(line)).collect();
+    let mut output = ToolOutput::json(json!({
         "cart": cart,
         "name": out.name,
         "bytes": out.bytes,
@@ -48,5 +57,13 @@ pub(super) fn run(
         "validation": out.validation,
         "install": out.install,
         "restart": out.restart,
-    })))
+        "log": log,
+        "screenshot": out.screenshot.is_some(),
+    }));
+    if let Some(png) = &out.screenshot {
+        output
+            .content
+            .push(json!({"type": "image", "data": base64(png), "mimeType": "image/png"}));
+    }
+    Ok(output)
 }

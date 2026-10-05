@@ -1,0 +1,5 @@
+[cart]
+license = "MIT"
+title = "Buttons"
+screen_mode = "320x240"
+buttons = "all"

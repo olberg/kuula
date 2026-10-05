@@ -214,6 +214,95 @@ end
     assert_eq!(c.draw_state().res.ledger().used(), 128 + 16);
 }
 
+/// `tline` through the whole stack: the argument defaults, the colour
+/// table, the wrap, a camera and the price.
+#[test]
+fn tline_samples_the_sheet_along_a_line() {
+    let src = "function _init()
+  sheet(load_sheet('tiles'))
+  palt(0, true)
+  cls(9)
+  -- The sheet's first row, a texel a pixel: 1, then 0, then solid 3.
+  tline(0, 2, 15, 2, 0, 0, 1, 0)
+  -- The same row wrapping inside its first two texels.
+  tline(0, 4, 5, 4, 0, 0, 1, 0, 0, 0, 2, 2)
+  -- Down the second texel column, wrapping inside a 2x2 region.
+  tline(10, 0, 10, 5, 1, 0, 0, 1, 0, 0, 2, 2)
+  -- A camera moves both ends; a half texel a pixel repeats each texel.
+  camera(-20, 0)
+  tline(0, 0, 3, 0, 8, 0, 0.5, 0)
+  camera()
+  -- Fractions floor, the ends may be given backwards, and the clip holds.
+  clip(30, 0, 2, 8)
+  tline(35, 6, 28, 6, 8.9, 0.1, 1, 0)
+  clip()
+  -- Thick: each step draws its texel across, down from a row and right of
+  -- a column.
+  tline(0, 20, 3, 20, 8, 0, 1, 0, 8, 0, 8, 8, 2)
+  tline(40, 0, 40, 2, 0, 0, 0, 1, 0, 0, 1, 2, 3)
+  local a = stat('cpu_cycles')
+  tline(0, 7, 15, 7, 0, 0, 1, 0)
+  local cost = stat('cpu_cycles') - a
+  tline(0, 7, 15, 7, 0, 0, 1, 0, 100, 100, 4, 4)
+  log(cost, pcall(tline, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 'x'))
+  sheet()
+  log(pcall(tline, 0, 0, 1, 1, 0, 0, 0, 0))
+end
+";
+    let mut c = gfx_console(src);
+    run(&mut c, 1);
+    ok(&c);
+    assert_eq!(pixel(&c, 0, 2), 1);
+    assert_eq!(pixel(&c, 1, 2), 9, "transparent 0 leaves what was there");
+    assert_eq!(pixel(&c, 7, 2), 9);
+    assert_eq!(pixel(&c, 8, 2), 3);
+    assert_eq!(pixel(&c, 15, 2), 3);
+    assert_eq!(pixel(&c, 16, 2), 9, "past the end of the line");
+    assert_eq!(pixel(&c, 0, 4), 1);
+    assert_eq!(pixel(&c, 1, 4), 9);
+    assert_eq!(pixel(&c, 2, 4), 1, "the position wrapped inside the region");
+    assert_eq!(pixel(&c, 4, 4), 1);
+    assert_eq!(pixel(&c, 10, 0), 9);
+    assert_eq!(pixel(&c, 10, 1), 2);
+    assert_eq!(
+        pixel(&c, 10, 2),
+        3,
+        "the 0 of the next turn keeps the row's pixel"
+    );
+    assert_eq!(pixel(&c, 10, 3), 2);
+    assert_eq!(pixel(&c, 10, 4), 9);
+    assert_eq!(pixel(&c, 10, 5), 2);
+    assert_eq!(pixel(&c, 20, 0), 3);
+    assert_eq!(pixel(&c, 23, 0), 3);
+    assert_eq!(pixel(&c, 24, 0), 9);
+    assert_eq!(pixel(&c, 30, 6), 3, "the clip lets two columns through");
+    assert_eq!(pixel(&c, 31, 6), 3);
+    assert_eq!(pixel(&c, 32, 6), 9);
+    assert_eq!(pixel(&c, 29, 6), 9);
+    assert_eq!(pixel(&c, 0, 20), 3);
+    assert_eq!(pixel(&c, 3, 21), 3, "a row two thick");
+    assert_eq!(pixel(&c, 0, 22), 9);
+    assert_eq!(pixel(&c, 40, 0), 1);
+    assert_eq!(pixel(&c, 42, 0), 1, "a column three thick");
+    assert_eq!(pixel(&c, 43, 0), 9);
+    assert_eq!(pixel(&c, 41, 1), 9, "the transparent texel");
+    assert_eq!(pixel(&c, 41, 2), 1, "and the wrap");
+    let log = c.output().log.to_vec();
+    let mut parts = log[0].split('\t');
+    let cost: u64 = parts.next().unwrap().parse().unwrap();
+    // 16 pixels, and the instructions that read the clock and made the call.
+    assert!(
+        (1 + 16 / 3..1 + 16 / 3 + 40).contains(&cost),
+        "a line of 16 pixels costs 1 + 16 / 3 and the call: {cost}"
+    );
+    assert_eq!(parts.next(), Some("false"), "a region of text is an error");
+    assert!(
+        log[1].starts_with("false\t") && log[1].contains("no_sheet"),
+        "{}",
+        log[1]
+    );
+}
+
 #[test]
 fn drawing_without_a_sheet_faults_with_no_sheet() {
     let mut c = gfx_console("function _init()\n  spr(0, 0, 0)\nend\n");

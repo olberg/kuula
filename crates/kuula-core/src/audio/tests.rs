@@ -15,6 +15,7 @@ fn playable(song: &Song) -> PlayableSong {
 fn sfx(m: &mut Mixer, song: &Song, channel: Option<i64>) -> usize {
     m.play_effect("sfx/t.omc", &playable(song), channel)
         .unwrap()
+        .expect("played")
 }
 
 fn music(m: &mut Mixer, song: &Song, fade: u32) {
@@ -75,8 +76,10 @@ fn effects_go_to_the_highest_class_0_run_and_cut_only_when_every_run_is_held() {
     // No music: every channel is class 0, highest first.
     let taken: Vec<usize> = (0..8).map(|_| sfx(&mut m, &one, None)).collect();
     assert_eq!(taken, [7, 6, 5, 4, 3, 2, 1, 0]);
-    // Every channel is held (class 3): the highest is cut.
+    // Every channel is held (class 3): the oldest sound is cut, which is
+    // the first one, on 7, and then the second.
     assert_eq!(sfx(&mut m, &one, None), 7);
+    assert_eq!(sfx(&mut m, &one, None), 6);
     assert_eq!(m.effects.len(), 8);
 }
 
@@ -88,11 +91,29 @@ fn the_four_classes_with_music_in_the_way() {
     music(&mut m, &song, 0);
     m.render();
     let one = long(1);
-    // Class 0: beyond the music's channels (7 to 4), then the reserved 2.
+    // The music keeps its channels: effects have class 0 alone, the
+    // channels beyond the music's (7 to 4) and the reserved 2, and then
+    // cut the oldest of themselves.
+    let taken: Vec<usize> = (0..9).map(|_| sfx(&mut m, &one, None)).collect();
+    assert_eq!(taken, [7, 6, 5, 4, 2, 7, 6, 5, 4]);
+
+    // With every channel of the music let go, the four classes.
     // Class 1: the quiet music channel 1. Class 2: sounding, highest first.
-    // Then every channel is held: class 3.
+    // Then every channel is held: class 3, the oldest.
+    m.stop_all();
+    music(&mut m, &song, 0);
+    m.render();
+    m.set_music_channels(Some(0));
     let taken: Vec<usize> = (0..9).map(|_| sfx(&mut m, &one, None)).collect();
     assert_eq!(taken, [7, 6, 5, 4, 2, 1, 3, 0, 7]);
+
+    // The music keeping its first channel only: 0 is never taken.
+    m.stop_all();
+    music(&mut m, &song, 0);
+    m.render();
+    m.set_music_channels(Some(1));
+    let taken: Vec<usize> = (0..9).map(|_| sfx(&mut m, &one, None)).collect();
+    assert_eq!(taken, [7, 6, 5, 4, 2, 1, 3, 7, 6]);
 }
 
 #[test]
@@ -100,13 +121,14 @@ fn a_run_is_classed_by_its_worst_channel() {
     let mut m = Mixer::new();
     music(&mut m, &long(4).silent(1).reserved(2).looping(), 0);
     m.render();
+    m.set_music_channels(Some(0));
     let two = long(2);
     assert_eq!(sfx(&mut m, &two, None), 6, "class 0");
     assert_eq!(sfx(&mut m, &two, None), 4, "class 0");
     // (0,1) and (2,3) are class 2, (1,2) class 1: the lowest wins.
     assert_eq!(sfx(&mut m, &two, None), 1);
     // Channels 0 and 3 are free but apart: every run of two is held, so the
-    // highest run is taken and the effect on it cut.
+    // run of the oldest effect is taken and that effect cut.
     assert_eq!(sfx(&mut m, &two, None), 6);
     assert_eq!(m.effects.len(), 3);
 }
@@ -119,7 +141,7 @@ fn a_run_of_a_reserved_channel_takes_its_role_into_account_only_as_class() {
     let two = long(2).reserved(1);
     assert_eq!(sfx(&mut m, &two, Some(2)), 2);
     assert_eq!(
-        m.held(),
+        m.busy(),
         [false, false, true, true, false, false, false, false]
     );
 }
@@ -130,20 +152,21 @@ fn a_named_channel_cuts_every_holder_of_the_run() {
     let a = sfx(&mut m, &long(2), Some(2));
     let b = sfx(&mut m, &long(1), Some(4));
     let c = m
-        .play_sample(sample(&[255; 1000]), Some(6), 1 << 16)
+        .play_sample("samples/t.wav", sample(&[255; 1000]), Some(6), 1 << 16)
         .unwrap();
-    assert_eq!((a, b, c), (2, 4, 6));
+    assert_eq!((a, b, c), (2, 4, Some(6)));
     // Channels 3 and 4: the effect on 2..3 and the one on 4 are cut, the
     // whole effect, so channel 2 is free again; the sample stays.
     assert_eq!(sfx(&mut m, &long(2), Some(3)), 3);
     assert_eq!(
-        m.held(),
+        m.busy(),
         [false, false, false, true, true, false, true, false]
     );
     // A sample on a held channel cuts its holder.
-    m.play_sample(sample(&[255; 10]), Some(4), 1 << 16).unwrap();
+    m.play_sample("samples/t.wav", sample(&[255; 10]), Some(4), 1 << 16)
+        .unwrap();
     assert_eq!(
-        m.held(),
+        m.busy(),
         [false, false, false, false, true, false, true, false]
     );
     assert_eq!(m.effects.len(), 0);
@@ -161,7 +184,7 @@ fn channels_are_checked_and_a_run_must_fit() {
             "audio_bad_channel"
         );
         assert_eq!(
-            m.play_sample(sample(&[1]), Some(bad), 1 << 16)
+            m.play_sample("samples/t.wav", sample(&[1]), Some(bad), 1 << 16)
                 .unwrap_err()
                 .code(),
             "audio_bad_channel"
@@ -175,7 +198,10 @@ fn channels_are_checked_and_a_run_must_fit() {
         "audio_no_room: sfx/t.omc has 3 channels, which do not fit from channel 6"
     );
     assert!(m.effects.is_empty(), "a refused effect holds nothing");
-    assert_eq!(m.play_effect("sfx/t.omc", &three, Some(5)).unwrap(), 5);
+    assert_eq!(
+        m.play_effect("sfx/t.omc", &three, Some(5)).unwrap(),
+        Some(5)
+    );
 }
 
 #[test]
@@ -187,7 +213,7 @@ fn an_effect_frees_its_channels_the_frame_after_it_ends() {
     sfx(&mut m, &Song::new(1).ticks(3), Some(2));
     let held: Vec<bool> = (0..6)
         .map(|_| {
-            let was = m.held()[2];
+            let was = m.busy()[2];
             m.render();
             was
         })
@@ -203,7 +229,7 @@ fn a_looping_effect_plays_until_it_is_cut() {
     sfx(&mut m, &Song::new(1).ticks(3).looping(), Some(1));
     frames(&mut m, 50);
     assert!(m.is_playing(1));
-    assert!(m.held()[1]);
+    assert!(m.busy()[1]);
     sfx(&mut m, &long(1), Some(1));
     assert_eq!(m.effects.len(), 1);
 }
@@ -266,6 +292,8 @@ fn a_reserved_channel_is_class_0_and_its_music_channels_are_not() {
     assert_eq!(sfx(&mut m, &long(1), None), 3);
     assert_eq!(sfx(&mut m, &long(1), None), 2);
     assert_eq!(sfx(&mut m, &long(1), None), 1, "reserved, class 0");
+    assert_eq!(sfx(&mut m, &long(1), None), 7, "the music keeps 0");
+    m.set_music_channels(Some(0));
     assert_eq!(sfx(&mut m, &long(1), None), 0, "sounding music, class 2");
 }
 
@@ -406,19 +434,19 @@ fn channel_gain_applies_to_song_channels_and_stays_through_new_sounds() {
 fn a_sample_voice_is_centred_and_scaled_by_its_channel_gain() {
     let mut m = Mixer::new();
     // 255 widens to 32512.
-    m.play_sample(sample(&[255; 2000]), Some(3), 1 << 16)
+    m.play_sample("samples/t.wav", sample(&[255; 2000]), Some(3), 1 << 16)
         .unwrap();
     let f = frame(&mut m);
     assert_eq!(&f[..4], &[32512, 32512, 32512, 32512]);
     m.set_volume(3, 128).unwrap();
     let f = frame(&mut m);
     assert_eq!(&f[..2], &[16256, 16256]);
-    assert!(m.held()[3]);
+    assert!(m.busy()[3]);
     m.set_volume(3, 0).unwrap();
     assert!(m.render().iter().all(|&s| s == 0));
     // The voice ends in the third frame, within its 2000 sample frames,
     // and its channel is free from the next.
-    assert!(!m.held()[3]);
+    assert!(!m.busy()[3]);
 }
 
 #[test]
@@ -456,7 +484,7 @@ fn the_frame_sums_music_effects_and_samples_then_scales_and_clips() {
     // And a sample voice on top: its centred value joins.
     let mut m = Mixer::new();
     music(&mut m, &song, 0);
-    m.play_sample(sample(&[192; 1000]), Some(5), 1 << 16)
+    m.play_sample("samples/t.wav", sample(&[192; 1000]), Some(5), 1 << 16)
         .unwrap();
     let three = frame(&mut m);
     assert!(one
@@ -515,7 +543,7 @@ fn stop_all_silences_everything_and_keeps_the_assets_and_gains() {
     let song = playable(&long(1));
     m.play_music(&song, 0);
     m.play_effect("sfx/t.omc", &song, Some(2)).unwrap();
-    m.play_sample(sample(&[255; 100]), Some(3), 1 << 16)
+    m.play_sample("samples/t.wav", sample(&[255; 100]), Some(3), 1 << 16)
         .unwrap();
     m.set_volume(1, 7).unwrap();
     m.render();
@@ -523,7 +551,7 @@ fn stop_all_silences_everything_and_keeps_the_assets_and_gains() {
     assert!(m.render().iter().all(|&s| s == 0));
     assert!(!m.music_playing());
     assert!((0..CART_CHANNELS).all(|c| !m.is_playing(c)));
-    assert_eq!(m.held(), [false; 8]);
+    assert_eq!(m.busy(), [false; 8]);
     assert_eq!(m.gains[1], 7);
 }
 
@@ -536,7 +564,7 @@ fn a_subsong_selects_the_arrangement_that_plays() {
     let held: Vec<bool> = (0..6)
         .map(|_| {
             m.render();
-            m.held()[0]
+            m.busy()[0]
         })
         .collect();
     assert_eq!(held, [true, true, true, true, false, false]);
@@ -550,7 +578,7 @@ fn a_song_keeps_the_clock_of_its_own_tick() {
     sfx(&mut m, &Song::new(1).tick(1, 50).ticks(6), Some(0));
     let mut held = Vec::new();
     for _ in 0..9 {
-        held.push(m.held()[0]);
+        held.push(m.busy()[0]);
         m.render();
     }
     assert_eq!(
@@ -560,7 +588,7 @@ fn a_song_keeps_the_clock_of_its_own_tick() {
     let mut m = Mixer::new();
     sfx(&mut m, &Song::new(1).ticks(6), Some(0));
     frames(&mut m, 7);
-    assert!(!m.held()[0]);
+    assert!(!m.busy()[0]);
 }
 
 #[test]
@@ -589,4 +617,135 @@ fn the_songs_own_volume_scales_its_output() {
         .iter()
         .zip(&half)
         .all(|(&u, &h)| (u as i32 * 128) >> 8 == h as i32));
+}
+
+#[test]
+fn a_sound_placed_by_name_keeps_its_channels() {
+    let mut m = Mixer::new();
+    let one = long(1);
+    // A voice line on a channel of its own, then effects wherever.
+    assert_eq!(sfx(&mut m, &one, Some(7)), 7);
+    let taken: Vec<usize> = (0..7).map(|_| sfx(&mut m, &one, None)).collect();
+    assert_eq!(taken, [6, 5, 4, 3, 2, 1, 0]);
+    // Everything is held. Channel 7 is kept, so the oldest of the others
+    // goes, and the one after it, never the sound that was named.
+    assert_eq!(sfx(&mut m, &one, None), 6);
+    assert_eq!(sfx(&mut m, &one, None), 5);
+    assert_eq!(m.effects.len(), 8);
+    assert!(m.effects.iter().any(|e| e.base == 7 && e.hold.born == 1));
+    // A run with a kept channel in it is not open either.
+    assert_eq!(sfx(&mut m, &long(2), None), 3, "4 and 3, the oldest two");
+    // A call that names the channel cuts what is kept there.
+    assert_eq!(sfx(&mut m, &one, Some(7)), 7);
+    assert!(!m.effects.iter().any(|e| e.hold.born == 1));
+    // A sample placed by name is kept the same way.
+    let mut m = Mixer::new();
+    m.play_sample("samples/t.wav", sample(&[255; 5000]), Some(7), 1 << 16)
+        .unwrap();
+    let taken: Vec<usize> = (0..8).map(|_| sfx(&mut m, &one, None)).collect();
+    assert_eq!(taken, [6, 5, 4, 3, 2, 1, 0, 6]);
+    assert_eq!(m.voices.len(), 1);
+}
+
+#[test]
+fn the_oldest_sounds_are_cut_first() {
+    let mut m = Mixer::new();
+    let one = long(1);
+    for _ in 0..8 {
+        sfx(&mut m, &one, None);
+    }
+    // Sounds 1 to 8 hold channels 7 down to 0. A run is as new as its
+    // newest sound: 7 and 6 hold sounds 1 and 2, the oldest pair.
+    assert_eq!(sfx(&mut m, &long(2), None), 6);
+    // Now 5 holds sound 3, the oldest; then 4.
+    assert_eq!(sfx(&mut m, &one, None), 5);
+    assert_eq!(sfx(&mut m, &one, None), 4);
+    // A sample is a sound like the others.
+    assert_eq!(
+        m.play_sample("samples/t.wav", sample(&[255; 5000]), None, 1 << 16)
+            .unwrap(),
+        Some(3)
+    );
+    // A free channel is taken before anything is cut.
+    m.stop(0, true).unwrap();
+    assert_eq!(sfx(&mut m, &one, None), 0);
+}
+
+#[test]
+fn sounds_placed_by_name_in_the_way_leave_a_sound_unplayed() {
+    let one = long(1);
+    let unnamed =
+        |m: &mut Mixer, song: &Song| m.play_effect("sfx/t.omc", &playable(song), None).unwrap();
+    // Music on 0 to 3 and a sound placed by name on each channel above it.
+    let mut m = Mixer::new();
+    music(&mut m, &long(4).looping(), 0);
+    for c in 4..8 {
+        sfx(&mut m, &one, Some(c));
+    }
+    assert_eq!(unnamed(&mut m, &one), None);
+    assert_eq!(
+        m.play_sample("samples/t.wav", sample(&[255; 100]), None, 1 << 16)
+            .unwrap(),
+        None
+    );
+    assert_eq!(m.effects.len(), 4, "nothing is cut for it");
+    assert!(m.voices.is_empty());
+    assert_eq!(m.started, 4, "a sound that is not played is not counted");
+    // One of them ends, and there is room again: for one channel, not two.
+    m.stop(6, true).unwrap();
+    assert_eq!(unnamed(&mut m, &long(2)), None);
+    assert_eq!(unnamed(&mut m, &one), Some(6));
+    // A sound longer than what the music leaves is an error, however free
+    // the channels above the music are.
+    m.stop_all();
+    music(&mut m, &long(4).looping(), 0);
+    assert_eq!(unnamed(&mut m, &long(4)), Some(4));
+    assert_eq!(
+        m.play_effect("sfx/t.omc", &playable(&long(5)), None)
+            .unwrap_err()
+            .code(),
+        "audio_no_room"
+    );
+    // Without music it is the same: all eight held by name.
+    let mut m = Mixer::new();
+    for c in 0..8 {
+        sfx(&mut m, &one, Some(c));
+    }
+    assert_eq!(unnamed(&mut m, &one), None);
+}
+
+#[test]
+fn music_that_keeps_a_channel_of_every_run_is_audio_no_room() {
+    let mut m = Mixer::new();
+    music(&mut m, &long(8).looping(), 0);
+    m.render();
+    let e = m
+        .play_effect("sfx/t.omc", &playable(&long(1)), None)
+        .unwrap_err();
+    assert_eq!(e.code(), "audio_no_room");
+    assert_eq!(
+        e.to_string(),
+        "audio_no_room: sfx/t.omc has 1 channels, and every run of that many has a channel the music keeps; music_channels(n) makes it keep fewer"
+    );
+    assert_eq!(m.started, 0, "a refused sound is not counted");
+    assert!(m
+        .play_sample("samples/t.wav", sample(&[255; 100]), None, 1 << 16)
+        .is_err());
+    // Naming a channel still goes anywhere.
+    assert_eq!(sfx(&mut m, &long(1), Some(0)), 0);
+    // Letting the top two go opens them, and only them.
+    m.set_music_channels(Some(6));
+    assert_eq!(sfx(&mut m, &long(2), None), 6);
+    assert_eq!(sfx(&mut m, &long(1), None), 7, "the older of the two");
+    assert!(m
+        .play_effect("sfx/t.omc", &playable(&long(3)), None)
+        .is_err());
+    // The number is held to 0..=8, and nothing is all of them again.
+    m.set_music_channels(Some(-3));
+    assert_eq!(m.music_keeps, 0);
+    m.set_music_channels(Some(99));
+    assert_eq!(m.music_keeps, 8);
+    m.set_music_channels(Some(2));
+    m.set_music_channels(None);
+    assert_eq!(m.music_keeps, 8);
 }

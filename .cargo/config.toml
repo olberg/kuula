@@ -33,5 +33,24 @@ CPATH = { value = "crates/kuula-lua/c", relative = true }
 # keeps GCC from vectorising float code, whose flush-to-zero is not IEEE.
 CFLAGS_armv7_unknown_linux_gnueabihf = "-Dluai_makeseed=0u*sizeof!luaL_newstate -DLUA_USER_H=\"kuula_user.h\" -march=armv7-a -mfpu=vfpv4 -mfloat-abi=hard -mtune=cortex-a7 -ffp-contract=off"
 
+# The Android build, `handheld/android/Dockerfile`: the NDK's clang for each
+# ABI, which `cc` reads CFLAGS_<target> for instead of CFLAGS, so each line
+# repeats the seed pin and the numeric-profile header above, and
+# `-ffp-contract=off` for the same reason as on the Miyoo (clang fuses
+# `a*b+c` by default on aarch64). No -march or -mfpu: the NDK's own
+# defaults are the ones Rust's Android targets use. cargo-ndk reads the
+# environment, not this file, so the Dockerfile exports these values from
+# here before it runs.
+CFLAGS_aarch64_linux_android = "-Dluai_makeseed=0u*sizeof!luaL_newstate -DLUA_USER_H=\"kuula_user.h\" -ffp-contract=off"
+CFLAGS_armv7_linux_androideabi = "-Dluai_makeseed=0u*sizeof!luaL_newstate -DLUA_USER_H=\"kuula_user.h\" -ffp-contract=off"
+CFLAGS_x86_64_linux_android = "-Dluai_makeseed=0u*sizeof!luaL_newstate -DLUA_USER_H=\"kuula_user.h\" -ffp-contract=off"
+
 [target.armv7-unknown-linux-gnueabihf]
 linker = "arm-linux-gnueabihf-gcc"
+
+# The 32-bit Android build is linked for 4 KB pages by default, which is
+# right for the 32-bit devices there are. The other two ABIs are linked for
+# 16 KB by the NDK; this makes the third the same, so the package's check
+# (every library's load segments aligned to 16 KB) has one rule.
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

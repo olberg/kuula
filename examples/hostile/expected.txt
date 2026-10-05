@@ -17,3 +17,5 @@ net_ticket runtime_error
 omc_inflate song_error
 omc_samples sample_error
 omc_chunks budget_exceeded
+omq_audio sample_error
+tline budget_exceeded

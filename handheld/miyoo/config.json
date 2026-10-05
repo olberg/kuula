@@ -1,0 +1,12 @@
+{
+"label":"Kuula",
+"icon":"/mnt/SDCARD/Emu/KUULA/kuula.png",
+"launch":"launch.sh",
+"rompath":"../../Roms/KUULA",
+"imgpath":"../../Roms/KUULA/Imgs",
+"gamelist":"../../Roms/KUULA/miyoogamelist.xml",
+"useswap":0,
+"shortname":0,
+"hidebios":1,
+"extlist":"cart|CART"
+}

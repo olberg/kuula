@@ -354,6 +354,17 @@ impl DrawState {
         Ok(s.touched)
     }
 
+    /// A textured line through the current sheet; see [`crate::tline`].
+    pub fn tline(
+        &mut self,
+        ends: (i32, i32, i32, i32),
+        tex: crate::tline::Texture,
+    ) -> Result<u64, GfxError> {
+        let (mut s, sheet, pen) = self.sheet_and_target()?;
+        crate::tline::tline(&mut s, pen, sheet, ends, tex);
+        Ok(s.touched)
+    }
+
     /// Draw one layer of a map through the current sheet.
     #[allow(clippy::too_many_arguments)]
     pub fn map(

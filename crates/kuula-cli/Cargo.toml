@@ -21,6 +21,10 @@ kuula-core.workspace = true
 kuula-lua.workspace = true
 kuula-host-sdl.workspace = true
 kuula-host-headless.workspace = true
+# What every host that runs the shell shares: the cart listing, the
+# settings file, and the lines a host logs about a cart it was started on,
+# which `kuula deploy` reads from an Android device over adb.
+kuula-host-common.workspace = true
 kuula-mcp.workspace = true
 # Host-owned cart transport and diagnostics. Optional so the handheld
 # build carries no tokio, QUIC or TLS.

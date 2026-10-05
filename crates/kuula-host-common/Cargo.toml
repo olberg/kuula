@@ -1,0 +1,9 @@
+[package]
+name = "kuula-host-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parts of a host that no windowing library is in: the frame schedule and the audio ring."
+
+[dependencies]
+kuula-core.workspace = true

@@ -150,10 +150,13 @@ pub(super) fn install(reg: &mut Reg<'_>) -> Result<()> {
         },
     )?;
 
-    reg.function(&FONT, |lua, h: Option<i64>| {
+    // A number, floored as every other is: taken as an integer by the
+    // binding library it would be refused or not for its fraction as that
+    // library's version decides.
+    reg.function(&FONT, |lua, h: Option<f64>| {
         let id = match h {
             None => None,
-            Some(h) => match FontId::from_height(h) {
+            Some(h) => match FontId::from_height(to_int(h)) {
                 Some(id) => Some(id),
                 None => return Err(Error::runtime("font takes 8, 16 or nothing")),
             },

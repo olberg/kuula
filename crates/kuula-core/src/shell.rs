@@ -68,6 +68,37 @@ pub enum SysRequest {
     /// after it; the host flips its link and persists the setting.
     SetNet(bool),
     Paused(bool),
+    /// End the host: what a shell started on one cart asks for where it
+    /// would have gone back to its list.
+    Exit,
+    /// The person's answer to a developer waiting for approval.
+    Dev(DevAction),
+}
+
+/// What the person holding the device answers to `DevView::pending`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevAction {
+    Approve,
+    Refuse,
+}
+
+/// The development receiver as the shell sees it: `sys.dev()`. The host
+/// fills it; a shell without a receiver has it empty.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DevView {
+    /// The shell was started as a development receiver.
+    pub active: bool,
+    /// The endpoint id of a developer the receiver refused because it is
+    /// not approved, until the person answers; empty when nobody waits.
+    pub pending: String,
+    /// What that developer offered to send, as it claimed: the cart's
+    /// name, its size in bytes and the address it came from. Empty and 0
+    /// when it did not say.
+    pub cart: String,
+    pub bytes: u32,
+    pub from: String,
+    /// The last thing the receiver did, for the list screen.
+    pub note: String,
 }
 
 /// Where the console gets a cart from when the shell asks to run one.
@@ -89,8 +120,12 @@ pub struct SysState {
     /// The host loaded a cart itself (`Console::host_load_cart`) and the
     /// shell has not asked since: `sys.host_started()` reads and clears it.
     pub host_started: bool,
+    /// The shell was started on one cart (`kuula shell --cart`): it opens
+    /// that cart at once and ends the host instead of showing its list.
+    pub single: bool,
     pub requests: Vec<SysRequest>,
     pub network: network::View,
+    pub dev: DevView,
 }
 
 impl SysState {
@@ -103,8 +138,10 @@ impl SysState {
             paused: false,
             menu_pressed: false,
             host_started: false,
+            single: false,
             requests: Vec::new(),
             network: network::View::default(),
+            dev: DevView::default(),
         }
     }
 

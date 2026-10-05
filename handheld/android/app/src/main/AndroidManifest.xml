@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No code (hasCode is false): Android's NativeActivity loads
+     libkuula_android.so and calls its android_main. No permissions: this
+     version has no networking. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- A handheld or a TV box may have no touch screen. -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <application
+        android:hasCode="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Kuula"
+        android:theme="@style/Theme.Kuula">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode"
+            android:exported="true"
+            android:screenOrientation="fullSensor">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="kuula_android" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

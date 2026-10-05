@@ -238,7 +238,7 @@ pub fn container(manifest: &[u8], chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
 /// compressed manifest).
 pub fn container_of(kind: &[u8; 4], manifest: &[u8], chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
     let mut out = b"\x89OMC".to_vec();
-    out.extend_from_slice(&[0, 0, 7, 0, 0, 0, 0, 0]);
+    out.extend_from_slice(&[0, 0, 8, 0, 0, 0, 0, 0]);
     put(&mut out, kind, manifest);
     for (kind, data) in chunks {
         put(&mut out, kind, data);

@@ -29,6 +29,7 @@ pub mod save;
 pub mod shell;
 pub mod snapshot;
 pub mod source;
+pub mod tline;
 pub mod transcript;
 pub mod zipsource;
 

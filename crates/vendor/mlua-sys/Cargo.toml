@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.88"
 name = "mlua-sys"
-version = "0.12.0"
+version = "0.13.0"
 authors = ["Aleksandr Orlenko <zxteam@pm.me>"]
 build = "build/main.rs"
 links = "lua"
@@ -73,7 +73,7 @@ version = "1.0"
 version = "1.0"
 
 [build-dependencies.lua-src]
-version = ">= 551.0.0, < 551.1.0"
+version = ">= 551.0.2, < 551.1.0"
 optional = true
 
 [build-dependencies.luajit-src]
@@ -81,7 +81,7 @@ version = ">= 210.7.0, < 210.8.0"
 optional = true
 
 [build-dependencies.luau0-src]
-version = "0.21.0"
+version = "0.22.0"
 optional = true
 
 [build-dependencies.pkg-config]

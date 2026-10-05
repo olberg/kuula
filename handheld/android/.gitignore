@@ -1,0 +1,9 @@
+# What the build puts in before Gradle runs, and what Gradle
+# leaves behind. None of it is source.
+.gradle/
+build/
+local.properties
+*.keystore
+app/src/main/jniLibs/
+app/src/main/assets/
+app/src/main/res/mipmap-nodpi/

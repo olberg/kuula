@@ -53,6 +53,7 @@ pub fn is_served(name: &str) -> bool {
             } else if let Some(rest) = name
                 .strip_prefix("sfx/")
                 .or_else(|| name.strip_prefix("music/"))
+                .or_else(|| name.strip_prefix("cues/"))
             {
                 rest.ends_with(".omc") && !rest.contains('/')
             } else if let Some(rest) = name.strip_prefix("samples/") {
@@ -282,11 +283,11 @@ impl Snapshot {
 }
 
 /// Directories worth descending into: `src` (any depth), `gfx`, `map`,
-/// `sfx`, `music` and `samples`.
+/// `sfx`, `music`, `cues` and `samples`.
 fn could_serve_under(dir: &str) -> bool {
     dir == "src"
         || dir.starts_with("src/")
-        || matches!(dir, "gfx" | "map" | "sfx" | "music" | "samples")
+        || matches!(dir, "gfx" | "map" | "sfx" | "music" | "cues" | "samples")
 }
 
 #[cfg(windows)]
@@ -360,6 +361,7 @@ mod tests {
             "map/level.json",
             "sfx/hit.omc",
             "music/song.omc",
+            "cues/fx.omc",
             "samples/kick.wav",
         ] {
             assert!(is_served(good), "{good}");
@@ -371,6 +373,8 @@ mod tests {
             "map/x.txt",
             "sfx/x.wav",
             "music/x.wav",
+            "cues/x.wav",
+            "cues/sub/x.omc",
             "samples/sub/x.wav",
             "src/x.txt",
             "other/main.lua",

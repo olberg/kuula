@@ -5,6 +5,8 @@ use std::fmt;
 
 use serde::Deserialize;
 
+use crate::input::{BASE_BUTTONS, CART_BUTTONS};
+
 mod license;
 pub use license::License;
 
@@ -45,6 +47,36 @@ impl ScreenMode {
     }
 }
 
+/// The buttons a cart declares under `[cart] buttons`. The rest read as
+/// released on every device, and a touch screen shows only these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum Buttons {
+    /// The D-pad, A and B: the two-button tier and the default.
+    #[default]
+    #[serde(rename = "two")]
+    Two,
+    /// X, Y, L1, R1, L2, R2, Start and Select as well.
+    #[serde(rename = "all")]
+    All,
+}
+
+impl Buttons {
+    /// The `BTN_*` bits the cart sees.
+    pub fn mask(self) -> u16 {
+        match self {
+            Buttons::Two => BASE_BUTTONS,
+            Buttons::All => CART_BUTTONS,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Buttons::Two => "two",
+            Buttons::All => "all",
+        }
+    }
+}
+
 /// A host service a cart declares under `[cart] services`. Only `net`
 /// exists; an unknown name is a manifest error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -67,6 +99,8 @@ pub struct Manifest {
     pub author: String,
     pub license: Option<License>,
     pub screen_mode: ScreenMode,
+    /// The buttons the cart sees.
+    pub buttons: Buttons,
     /// Sheet names decoded at boot, `gfx/<name>.png`.
     pub preload_sheets: Vec<String>,
     /// Map names decoded at boot, `map/<name>.json`.
@@ -101,6 +135,8 @@ struct CartSection {
     license: Option<License>,
     #[serde(default)]
     screen_mode: ScreenMode,
+    #[serde(default)]
+    buttons: Buttons,
     #[serde(default)]
     services: Vec<Service>,
 }
@@ -186,6 +222,7 @@ impl Manifest {
             author: file.cart.author,
             license: file.cart.license,
             screen_mode: file.cart.screen_mode,
+            buttons: file.cart.buttons,
             preload_sheets: file.preload.sheets,
             preload_maps: file.preload.maps,
             services,
@@ -250,6 +287,24 @@ mod tests {
         assert_eq!(e.line, Some(2));
         let e = Manifest::parse("[cart]\nservice = [\"net\"]\n").unwrap_err();
         assert!(e.message.contains("service"), "{}", e.message);
+    }
+
+    #[test]
+    fn buttons_are_two_unless_all_are_declared() {
+        assert_eq!(Manifest::default().buttons, Buttons::Two);
+        assert_eq!(Buttons::Two.mask(), BASE_BUTTONS);
+        let m = Manifest::parse("[cart]\nbuttons = \"all\"\n").unwrap();
+        assert_eq!(m.buttons, Buttons::All);
+        assert_eq!(m.buttons.mask(), CART_BUTTONS);
+        let m = Manifest::parse("[cart]\nbuttons = \"two\"\n").unwrap();
+        assert_eq!(m.buttons, Buttons::Two);
+        for b in [Buttons::Two, Buttons::All] {
+            let text = format!("[cart]\nbuttons = \"{}\"\n", b.name());
+            assert_eq!(Manifest::parse(&text).unwrap().buttons, b);
+        }
+        let e = Manifest::parse("[cart]\nbuttons = \"six\"\n").unwrap_err();
+        assert!(e.message.contains("six"), "{}", e.message);
+        assert_eq!(e.line, Some(2));
     }
 
     #[test]

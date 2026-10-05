@@ -49,8 +49,16 @@ const SHUTDOWN_WAIT: Duration = Duration::from_millis(1500);
 /// Events a receiver holds for its caller; later ones are dropped.
 const EVENT_QUEUE: usize = 64;
 
-/// At most one `Unpaired` event this often.
+/// At most one `Unpaired` event this often for one endpoint id.
 const UNPAIRED_REPORT: Duration = Duration::from_secs(1);
+
+/// Endpoint ids whose last report is remembered. An id beyond them takes
+/// the place of the one reported longest ago.
+const UNPAIRED_IDS: usize = 32;
+
+/// How long a connection that is not approved has to say what it would
+/// send, so that a person can be asked about it.
+const UNPAIRED_OFFER: Duration = Duration::from_secs(2);
 
 /// The staging directory under a carts directory.
 pub const STAGING_DIR: &str = ".staging";
@@ -92,8 +100,10 @@ impl RestartReply {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeployEvent {
     /// A connection from an id that is not approved was closed. Reported
-    /// at most once a second, so a person at the receiver can approve it.
-    Unpaired { id: String },
+    /// at most once a second for each id, so a person at the receiver can
+    /// approve it. `asked` is what it offered to send, when it said so in
+    /// time.
+    Unpaired { id: String, asked: Option<Asked> },
     /// A second paired connection arrived during a transfer.
     Busy { id: String },
     /// An offer passed its checks and was accepted.
@@ -112,6 +122,19 @@ pub enum DeployEvent {
         restart: Restart,
         detail: String,
     },
+}
+
+/// What a sender that is not approved offered. It is read so that a
+/// person can be asked whether to approve the sender, and it is the
+/// sender's claim: nothing of it is answered, staged or installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asked {
+    /// The cart's name, valid as any offered name is.
+    pub name: String,
+    /// The size it declared.
+    pub bytes: u32,
+    /// Where the connection came from, as an address, or empty.
+    pub from: String,
 }
 
 /// Everything the connection tasks share.
@@ -134,34 +157,89 @@ impl Ctx {
     fn emit(&self, event: DeployEvent) {
         let _ = self.events.try_send(event);
     }
+}
 
-    fn report_unpaired(&self, id: &str) {
-        if self.unpaired.allow(Instant::now()) {
-            self.emit(DeployEvent::Unpaired { id: id.to_string() });
-        }
+/// The address a connection comes from on the path it uses, without the
+/// port; empty until a path is chosen.
+fn remote(conn: &Connection) -> String {
+    let paths = conn.paths();
+    let Some(path) = paths.iter().find(|p| p.is_selected()) else {
+        return String::new();
+    };
+    // A direct path prints as `ip:<address>:<port>`; a relayed one is
+    // shown as it prints.
+    let addr = path.remote_addr().to_string();
+    match addr
+        .strip_prefix("ip:")
+        .unwrap_or(&addr)
+        .parse::<SocketAddr>()
+    {
+        Ok(a) => a.ip().to_string(),
+        Err(_) => addr,
     }
 }
 
-/// Lets something happen at most once per interval.
+/// The stream a sender opened, kept until its connection is closed.
+type Streams = (SendStream, iroh::endpoint::RecvStream);
+
+/// What a connection that is not approved offers: its first frame, under
+/// an offer's own bounds and a deadline of its own. `None` when it does
+/// not say in time or says something that is no offer. The stream comes
+/// back too: the caller holds it until it has closed the connection, so
+/// that the sender reads the close and its code, and never the end of a
+/// stream that was let go first.
+async fn asked(
+    conn: &Connection,
+    ctx: &Ctx,
+    deadline: TokioInstant,
+) -> (Option<Asked>, Option<Streams>) {
+    let mut stop = ctx.stop.clone();
+    let opened = or_stop(&mut stop, timeout_at(deadline, conn.accept_bi())).await;
+    let Some(Ok(Ok(mut streams))) = opened else {
+        return (None, None);
+    };
+    let read = or_stop(&mut stop, timeout_at(deadline, read_offer(&mut streams.1))).await;
+    let asked = match read {
+        Some(Ok(Ok(offer))) => Some(Asked {
+            name: offer.name,
+            bytes: offer.len,
+            from: remote(conn),
+        }),
+        _ => None,
+    };
+    (asked, Some(streams))
+}
+
+/// Lets each endpoint id be reported at most once per interval. One id
+/// that keeps connecting takes no other id's turn. The ids remembered are
+/// bounded: a new one beyond them replaces the one reported longest ago.
 struct Limiter {
     every: Duration,
-    last: Mutex<Option<Instant>>,
+    last: Mutex<Vec<(String, Instant)>>,
 }
 
 impl Limiter {
     fn new(every: Duration) -> Limiter {
         Limiter {
             every,
-            last: Mutex::new(None),
+            last: Mutex::new(Vec::new()),
         }
     }
 
-    fn allow(&self, now: Instant) -> bool {
+    fn allow(&self, id: &str, now: Instant) -> bool {
         let mut last = self.last.lock().unwrap();
-        if last.is_some_and(|t| now.duration_since(t) < self.every) {
-            return false;
+        if let Some(entry) = last.iter_mut().find(|(known, _)| known == id) {
+            if now.duration_since(entry.1) < self.every {
+                return false;
+            }
+            entry.1 = now;
+            return true;
         }
-        *last = Some(now);
+        if last.len() == UNPAIRED_IDS {
+            let oldest = (0..last.len()).min_by_key(|&i| last[i].1).unwrap_or(0);
+            last.swap_remove(oldest);
+        }
+        last.push((id.to_string(), now));
         true
     }
 }
@@ -346,10 +424,20 @@ async fn handle(incoming: Incoming, ctx: &Ctx) {
     // handshake that made it, which has a bound of its own.
     let connected = TokioInstant::now();
     let id = conn.remote_id().to_string();
-    // Pairing first: nothing of this connection is read or accepted.
+    // Pairing first: nothing of this connection is answered or accepted.
+    // The one that is reported, at most one a second for an id, is also
+    // read as far as its offer, which says what the person is asked
+    // about; any other is closed unread.
     if !ctx.store.is_approved(&id) {
-        ctx.report_unpaired(&id);
+        // Held until the close below has been made.
+        let mut streams = None;
+        if ctx.unpaired.allow(&id, Instant::now()) {
+            let (asked, opened) = asked(&conn, ctx, connected + UNPAIRED_OFFER).await;
+            streams = opened;
+            ctx.emit(DeployEvent::Unpaired { id, asked });
+        }
         conn.close(close::UNPAIRED.into(), close::reason(close::UNPAIRED));
+        drop(streams);
         return;
     }
     if ctx.active.swap(true, Ordering::SeqCst) {
@@ -711,13 +799,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_unpaired_report_is_limited_to_one_a_second() {
+    fn the_unpaired_report_is_limited_to_one_a_second_for_each_id() {
         let limiter = Limiter::new(UNPAIRED_REPORT);
         let t0 = Instant::now();
-        assert!(limiter.allow(t0));
-        assert!(!limiter.allow(t0));
-        assert!(!limiter.allow(t0 + Duration::from_millis(999)));
-        assert!(limiter.allow(t0 + Duration::from_millis(1000)));
-        assert!(!limiter.allow(t0 + Duration::from_millis(1500)));
+        assert!(limiter.allow("a", t0));
+        assert!(!limiter.allow("a", t0));
+        assert!(!limiter.allow("a", t0 + Duration::from_millis(999)));
+        assert!(limiter.allow("a", t0 + Duration::from_millis(1000)));
+        assert!(!limiter.allow("a", t0 + Duration::from_millis(1500)));
+        // One id that keeps asking takes no other id's turn.
+        assert!(limiter.allow("b", t0 + Duration::from_millis(1500)));
+        assert!(!limiter.allow("b", t0 + Duration::from_millis(1600)));
+        assert!(!limiter.allow("a", t0 + Duration::from_millis(1600)));
+    }
+
+    #[test]
+    fn the_ids_remembered_are_bounded() {
+        let limiter = Limiter::new(UNPAIRED_REPORT);
+        let t0 = Instant::now();
+        for i in 0..UNPAIRED_IDS as u64 + 5 {
+            assert!(limiter.allow(&format!("id{i}"), t0 + Duration::from_millis(i)));
+            assert!(limiter.last.lock().unwrap().len() <= UNPAIRED_IDS);
+        }
+        // The newest are still held back; the oldest were let go.
+        let now = t0 + Duration::from_millis(100);
+        assert!(!limiter.allow(&format!("id{}", UNPAIRED_IDS + 4), now));
+        assert!(limiter.allow("id0", now));
     }
 }

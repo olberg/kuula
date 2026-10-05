@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::LuaGuest;
-use kuula_core::input::{BTN_A, BTN_UP};
+use kuula_core::input::{BTN_A, BTN_MENU, BTN_SELECT, BTN_UP, BUTTON_COUNT, CART_BUTTONS};
 use kuula_core::{Console, DrawState, FrameInput, Guest, Snapshot, SnapshotLimits};
 
 mod api;
@@ -160,7 +160,7 @@ fn btn_reads_the_frame_input_snapshot() {
 function _draw()
   pset(0, 0, btn(0) and 1 or 2)
   pset(1, 0, btn(4) and 1 or 2)
-  pset(2, 0, btn(9) and 1 or 2)
+  pset(2, 0, btn(14) and 1 or 2)
   pset(3, 0, btn(-1) and 1 or 2)
 end
 ";
@@ -180,6 +180,49 @@ end
     assert_eq!([pixel(&c, 0, 0), pixel(&c, 1, 0)], [2, 1]);
     c.step(FrameInput::NONE);
     assert_eq!([pixel(&c, 0, 0), pixel(&c, 1, 0)], [2, 2]);
+}
+
+#[test]
+fn btn_knows_fourteen_buttons_and_never_menu() {
+    // Pixel n is lit while button n is held; 14 and 15 are no buttons.
+    let src = "\
+function _draw()
+  for n = 0, 15 do pset(n, 0, btn(n) and 1 or 2) end
+end
+";
+    let all = "[cart]\nscreen_mode = \"320x240\"\nbuttons = \"all\"\n";
+    let mut c = Console::new(
+        cart(&[("main.lua", src.as_bytes()), ("cart.toml", all.as_bytes())]),
+        LuaGuest::factory,
+    );
+    let row = |c: &Console| -> Vec<u8> { (0..16).map(|n| pixel(c, n, 0)).collect() };
+    c.step(FrameInput::NONE);
+    for n in 0..BUTTON_COUNT as usize {
+        c.step(FrameInput::new(1 << n));
+        let mut expected = vec![2; 16];
+        expected[n] = 1;
+        assert_eq!(row(&c), expected, "button {n}");
+    }
+    // All of them at once: Start and Select together are Menu, so the
+    // cart has the other twelve.
+    c.step(FrameInput::new(CART_BUTTONS));
+    assert_eq!(row(&c), [[1; 12].as_slice(), &[2; 4]].concat());
+    c.step(FrameInput::new(CART_BUTTONS & !BTN_SELECT));
+    assert_eq!(row(&c), [[1; 12].as_slice(), &[2; 4]].concat());
+    c.step(FrameInput::NONE);
+    c.step(FrameInput::new(CART_BUTTONS & !BTN_SELECT));
+    assert_eq!(row(&c), [[1; 13].as_slice(), &[2; 3]].concat());
+    // Without a shell the console still strips Menu, and no number reads
+    // the bits above the cart's.
+    c.step(FrameInput::new(BTN_MENU | 1 << 14));
+    assert_eq!(row(&c), [2; 16]);
+
+    // A cart that declares nothing has the D-pad, A and B: the rest read
+    // as released whatever is held.
+    let mut c = console(src);
+    c.step(FrameInput::NONE);
+    c.step(FrameInput::new(CART_BUTTONS));
+    assert_eq!(row(&c), [[1; 6].as_slice(), &[2; 10]].concat());
 }
 
 #[test]

@@ -440,7 +440,7 @@ mod tests {
                     "boom",
                 ));
             }
-            state.cls(input.buttons);
+            state.cls(input.buttons as u8);
             state.log.push(format!("f{frame}"));
             state.profile = FrameProfile {
                 cycles: [frame * 10, 5, 0, 0, 0, 0, 1],

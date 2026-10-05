@@ -444,7 +444,7 @@ impl Transcript {
                 )));
             }
             out.inputs.extend(std::iter::repeat_n(
-                FrameInput::new(buttons as u8),
+                FrameInput::new(buttons as u16),
                 run as usize,
             ));
         }
@@ -726,7 +726,7 @@ mod tests {
         );
         let mut inputs = vec![FrameInput::new(8); 30];
         inputs.extend(vec![FrameInput::NONE; 2]);
-        inputs.push(FrameInput::new(63));
+        inputs.push(FrameInput::new(CART_BUTTONS));
         Transcript {
             header,
             inputs,
@@ -794,7 +794,7 @@ mod tests {
         );
         // Out-of-range buttons and over-long runs.
         assert_eq!(
-            code(&text.replace("buttons = 63", "buttons = 64")),
+            code(&text.replace("buttons = 16383", "buttons = 16384")),
             TranscriptError::FORMAT
         );
         assert_eq!(
@@ -809,7 +809,7 @@ mod tests {
 
     #[test]
     fn recorder_caps_and_the_wrapper_records_what_the_cart_saw() {
-        struct Stub(Vec<u8>);
+        struct Stub(Vec<u16>);
         impl Guest for Stub {
             fn step(&mut self, _: &mut DrawState, input: FrameInput, _: u64) -> Result<(), Fault> {
                 self.0.push(input.buttons);

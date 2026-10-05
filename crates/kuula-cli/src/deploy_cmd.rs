@@ -62,13 +62,17 @@ pub enum DeployCommand {
         #[arg(long)]
         once: bool,
     },
-    /// Push a cart to a receiver.
+    /// Push a cart to a receiver, or to an Android device over adb.
     Push {
         /// A cart directory, or a .zip/.cart file.
         cart: PathBuf,
-        /// The receiver's ticket.
+        /// The receiver's ticket; or `adb` or `adb:<serial>` for the
+        /// Kuula app on an Android device.
         #[arg(long)]
         to: String,
+        /// With an adb target: write the device's screen to this PNG.
+        #[arg(long, value_name = "FILE")]
+        screenshot: Option<PathBuf>,
         #[command(flatten)]
         relay: RelayArgs,
     },
@@ -161,7 +165,23 @@ pub fn main(command: DeployCommand) -> u8 {
             relay,
             once,
         } => receive(store, carts, relay.config(bind), once),
-        DeployCommand::Push { cart, to, relay } => push(&store, &cart, &to, relay.config(None)),
+        DeployCommand::Push {
+            cart,
+            to,
+            screenshot,
+            relay,
+        } => match crate::adb::target(&to) {
+            Some(Ok(target)) => crate::adb::push_cli(&cart, &target, screenshot.as_deref()),
+            Some(Err(why)) => {
+                eprintln!("error: {why}");
+                EXIT_USAGE
+            }
+            None if screenshot.is_some() => {
+                eprintln!("error: --screenshot is for an adb target");
+                EXIT_USAGE
+            }
+            None => push(&store, &cart, &to, relay.config(None)),
+        },
     }
 }
 
@@ -169,8 +189,17 @@ pub fn main(command: DeployCommand) -> u8 {
 /// and in the shell's `--dev-receiver`.
 pub fn describe(event: &DeployEvent) -> String {
     match event {
-        DeployEvent::Unpaired { id } => {
-            format!("unpaired: {id} was refused; approve it with: kuula deploy approve {id}")
+        DeployEvent::Unpaired { id, asked } => {
+            let offered = match asked {
+                Some(a) => format!(
+                    " (it offered {}, {} bytes, from {})",
+                    a.name, a.bytes, a.from
+                ),
+                None => String::new(),
+            };
+            format!(
+                "unpaired: {id} was refused{offered}; approve it with: kuula deploy approve {id}"
+            )
         }
         DeployEvent::Busy { id } => format!("busy: {id} was refused during a transfer"),
         DeployEvent::Offered { id, name, bytes } => {
@@ -336,6 +365,9 @@ pub fn mcp_push(
         validation: stages.validation.into(),
         install: stages.install.into(),
         restart: report.restart.as_str().to_string(),
+        // A receiver sends neither its log nor its screen.
+        log: Vec::new(),
+        screenshot: None,
     })
 }
 

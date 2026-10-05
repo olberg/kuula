@@ -27,7 +27,7 @@ use std::fmt;
 pub use iroh::SecretKey;
 pub use package::Package;
 pub use receiver::{
-    DeployEvent, DeployReceiver, ReceiverConfig, RestartReply, RestartRequest, STAGING_DIR,
+    Asked, DeployEvent, DeployReceiver, ReceiverConfig, RestartReply, RestartRequest, STAGING_DIR,
 };
 pub use sender::{push, PushReport, Stages};
 pub use store::{DeployStore, StoreError, MAX_APPROVED};

@@ -57,6 +57,42 @@ fn missing_directory_is_a_usage_error() {
 }
 
 #[test]
+fn a_shell_on_one_cart_refuses_what_is_not_a_cart_before_it_opens_a_window() {
+    // A file that is not there, and a directory that has no main.lua.
+    for path in ["no-such-cart.cart", env!("CARGO_MANIFEST_DIR")] {
+        let out = kuula().args(["shell", "--cart", path]).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{path}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("is not a cart"), "{err}");
+    }
+    // One cart and a list of them are two things, and so are one cart and
+    // a receiver that installs others. The cart is a real one, so that it
+    // is the combination that is refused and nothing else.
+    let hello = example("hello");
+    for other in [vec!["--carts", "x"], vec!["--dev-receiver"]] {
+        let out = kuula()
+            .args(["shell", "--cart"])
+            .arg(&hello)
+            .args(&other)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{other:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("cannot be used with"), "{other:?}: {err}");
+    }
+    // The receiver's flag is also taken before the `shell` word, where the
+    // parser sees no conflict.
+    let out = kuula()
+        .args(["--dev-receiver", "shell", "--cart"])
+        .arg(&hello)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("do not go together"), "{err}");
+}
+
+#[test]
 fn directory_without_main_lua_is_a_usage_error() {
     let out = kuula()
         .args(["run", env!("CARGO_MANIFEST_DIR"), "--frames", "1"])
@@ -272,7 +308,7 @@ fn a_load_fault_numbers_its_only_frame_like_the_hash_list() {
 fn bad_input_script_is_a_usage_error() {
     let dir = Scratch::new();
     let script = dir.0.join("script.json");
-    std::fs::write(&script, r#"[{"buttons": ["start"]}]"#).unwrap();
+    std::fs::write(&script, r#"[{"buttons": ["turbo"]}]"#).unwrap();
     let out = kuula()
         .args([
             "run",
@@ -284,7 +320,7 @@ fn bad_input_script_is_a_usage_error() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("start"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("turbo"));
 }
 
 #[test]
@@ -504,6 +540,52 @@ fn a_build_without_networking_refuses_deploy() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("no networking"), "{args:?}: {stderr}");
     }
+}
+
+/// A push over adb is in every build, and what is wrong with the cart's
+/// name or the target is said before adb is looked for: neither needs a
+/// device, or adb, to refuse.
+#[test]
+fn a_push_over_adb_refuses_a_bad_name_and_a_bad_target_without_adb() {
+    let scratch = Scratch::new();
+    let named = |name: &str| {
+        let dir = scratch.0.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.lua"), "function _update() end").unwrap();
+        dir
+    };
+    let bad = named("Bad Name");
+    let good = named("good-name");
+    for (cart, to, says) in [
+        (&bad, "adb", "deploy_offer"),
+        (&good, "adb:", "an adb target is"),
+        (&good, "adb:two words", "an adb target is"),
+    ] {
+        let out = kuula()
+            .args(["deploy", "push"])
+            .arg(cart)
+            .args(["--to", to])
+            // Nothing here may reach a real adb.
+            .env("KUULA_ADB", scratch.0.join("no-adb-here"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{to:?}: {stderr}");
+        assert!(stderr.contains(says), "{to:?}: {stderr}");
+        assert!(!stderr.contains("no networking"), "{to:?}: {stderr}");
+    }
+    // With no adb to be found, a good cart and target end with that, as
+    // the failure it is.
+    let out = kuula()
+        .args(["deploy", "push"])
+        .arg(&good)
+        .args(["--to", "adb"])
+        .env("KUULA_ADB", scratch.0.join("no-adb-here"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("adb_unavailable"), "{stderr}");
 }
 
 /// The deterministic pair simulation is in memory and stays available.

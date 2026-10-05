@@ -7,6 +7,7 @@ description = "SDL2 desktop host for Kuula with an integer scaler."
 
 [dependencies]
 kuula-core.workspace = true
+kuula-host-common.workspace = true
 
 # Windows: SDL2 compiled from the crate's bundled source and linked
 # statically, so kuula.exe carries no DLL.

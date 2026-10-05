@@ -418,7 +418,7 @@ fn load_sampler(cx: &mut Ctx, e: &Map<String, Value>, path: &str, sample_count: 
 /// The instruments by number, each number's index in the payload's array, and which samples the
 /// song's samplers name. Every instrument is checked, also one whose number is bad or taken, which
 /// the song then leaves out, with the samples it names.
-pub(super) fn load_instruments(cx: &mut Ctx, root: &Map<String, Value>, sample_count: usize) -> (Vec<Option<Arc<Instrument>>>, Vec<usize>, Vec<bool>) {
+pub(crate) fn load_instruments(cx: &mut Ctx, root: &Map<String, Value>, sample_count: usize) -> (Vec<Option<Arc<Instrument>>>, Vec<usize>, Vec<bool>) {
     let mut out: Vec<Option<Arc<Instrument>>> = vec![None; MAX_INSTRUMENT as usize + 1];
     let mut index = vec![0; MAX_INSTRUMENT as usize + 1];
     let mut used_samples = vec![false; sample_count];
@@ -509,7 +509,7 @@ fn check_credits(cx: &mut Ctx, v: &Value, path: &str) {
     }
 }
 
-pub(super) fn load_samples(cx: &mut Ctx, root: &Map<String, Value>, resources: &[Source]) -> Vec<Arc<Sample>> {
+pub(crate) fn load_samples(cx: &mut Ctx, root: &Map<String, Value>, resources: &[Source]) -> Vec<Arc<Sample>> {
     let mut out = Vec::new();
     let Some(list) = cx.array(root, "samples", "", false) else { return out };
     if list.len() > MAX_SAMPLES {

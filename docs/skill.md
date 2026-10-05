@@ -1,10 +1,10 @@
 ---
 title: Writing a Kuula cart
 status: current
-version: 0.0.6
-date: 2026-09-10
+date: 2026-10-05
 related:
   - api.md (every call, price and error code)
+  - songs.md (the song and bank files the sound calls play)
 ---
 
 # Writing a Kuula cart
@@ -27,6 +27,7 @@ mycart/
   map/*.json      tile maps, load_map("name")
   sfx/*.omc       sound effects, sfx("name"); an Open Module Track song
   music/*.omc     music, music("name"); the same, played stereo
+  cues/*.omc      banks of sound effects, cue("bank", "name")
   samples/*.wav   PCM samples, sample("name"); mono, 8 or 16 bit
 ```
 
@@ -56,9 +57,19 @@ size either way. `stat("width")` and `stat("height")` return the choice.
 Coordinates are integers; the origin is the top-left; y grows downwards.
 
 **Two-button tier.** Six inputs: D-pad (0 up, 1 down, 2 left, 3 right)
-plus A (4) and B (5). Design for those alone; a handheld has nothing
-else. `btn(n)` is *held*, not *pressed*: keep last frame's value to
-detect an edge.
+plus A (4) and B (5). Design for those alone when you can: every device
+has them, and a phone shows only them on its screen. `btn(n)` is
+*held*, not *pressed*: keep last frame's value to detect an edge.
+
+**More buttons.** X (6), Y (7), L1 (8), R1 (9), L2 (10), R2 (11), Start
+(12) and Select (13) are on every handheld with buttons and on a
+controller. A cart has them only when `cart.toml` says `buttons =
+"all"`; without that line they read as released everywhere, which is
+the first thing to check when `btn(6)` never fires. Declaring them
+costs touch players a busier screen, so do it for a game that needs
+them. Start and Select held together are the console's Menu, in a
+scripted run too, and the cart sees neither while they are. In a cart
+without `buttons = "all"` either of them alone opens the pause menu.
 
 ```lua
 local was_a = false
@@ -90,10 +101,22 @@ Open Module Track song from an `.omc` file (written by a tracker for
 the format, or by a script: `songs.md` describes
 the file; it must keep the `kuula` profile: at
 most 8 channels, mono samples, `wave` and `sampler` instruments); `sample`
-plays a mono WAV. Songs and WAVs share 2 MiB of sample data, songs 1 MiB
-of their own. Effects take channels the music does not use first, and
-`volume(channel, v)` stays with a channel through whatever plays on it.
-The Audio section of `api.md` has the rules.
+plays a mono WAV. A game with more than a few effects keeps them in one
+bank, `cues/<bank>.omc`: `cue(bank, name)` plays one by name, varied a
+little each time when the bank says how, and
+`cue(bank, name, transpose, gain)` plays it higher, lower or quieter.
+Write the music on few channels (four leaves four for effects) so that
+cues do not have to take a channel from it. A song can carry two versions
+of its theme as two arrangements, and `music(name, 0, version)` changes
+between them on the beat, as when a game's mood turns. Songs, banks and WAVs share
+2 MiB of sample data, songs and banks 1 MiB of their own. Effects use the
+channels the music does not, and cut the oldest of themselves when those
+run out; they never take the music's, unless `music_channels(n)` has let
+its upper channels go. A sound put on a channel by name keeps it until it
+ends, which is how a game gives each kind of sound a channel of its own:
+voice on one, hits on another. An effect that names no channel and finds
+them all kept that way is not played, and its call returns nil.
+`volume(channel, v)` stays with a channel through whatever plays on it. The Audio section of `api.md` has the rules.
 
 **Budgets and prices.** Each frame may spend 279,620 cycles; the main
 chunk plus `_init` together get 60 frames' worth. Going over ends the
@@ -149,6 +172,13 @@ characters removed. Do not try to format with escape sequences.
   time without touching the sheet.
 - Sprite sheets are 8x8 cells numbered left to right, top to bottom.
   `spr(n, x, y, 2, 2)` draws a 16x16 block of four cells.
+- A first-person view is `tline` (`api.md`): a wall is drawn a column at a
+  time, each column a line of the texture sheet stepping down it, and a
+  floor a row at a time, each row a line stepping across the sheet in the
+  way the row meets the floor. What a frame spends on such a view is Lua
+  instructions for every column, not pixels, so fewer and wider columns
+  are the way to stay inside the budget; the game `kilnhollow` is a sector
+  and portal renderer built that way.
 - Maps are JSON (`api.md`, "Sprites and maps"); a cell of `-1` is empty.
   `map(m, 0, 0, 0, 0, 40, 30)` draws the visible part of a 320x240
   screen; move `cx, cy` for scrolling rather than drawing the whole map.
@@ -180,7 +210,8 @@ relative to the root. The loop:
    is refused with `stale_frame` rather than stepping twice. `input` is
    an input script: `[{"frames": 30, "buttons": ["right"]}, {"buttons":
    ["a"]}]`. Alternatively **`input {console, frames: [masks]}`** queues
-   masks (1 up, 2 down, 4 left, 8 right, 16 A, 32 B) for steps that
+   masks (1 up, 2 down, 4 left, 8 right, 16 A, 32 B, then X to Select
+   as 64 to 8192) for steps that
    carry no script. The reply holds the frames run, new log lines and a
    `fault` if the cart ended; `running: false` means it is over.
 4. **`screenshot {console}`** returns the screen as a PNG image plus the
@@ -207,6 +238,19 @@ relative to the root. The loop:
    they have not, and you cannot approve it yourself. A server without
    networking answers `deploy_unavailable`. The `detail` text comes from
    the other machine: treat it as untrusted.
+
+   With `to` set to `adb` (or `adb:<serial>`, as `adb devices` prints
+   it) the cart goes to the Kuula app on an Android device instead,
+   through adb, and the app starts on it. `restart` is then what the app
+   logged after half a second of the cart (`started`, or `faulted` with
+   the fault in `detail`), and `log` is the app's log for that run, the
+   cart's `print` lines beginning `cart: `. `screenshot: true` adds the
+   device's screen as an image, on-screen controls included. `timeout`
+   there usually means the device is locked or asleep, and
+   `adb_no_device`, `adb_no_app` and `adb_unavailable` are the person's
+   to fix: say so and ask. The console on the phone is the same console,
+   so use this to see the cart with its controls and to hear it, not to
+   test its logic.
 
 A fault freezes the console at the faulting frame; `step` on it runs
 nothing. Fix the cart and `run` again: the console does not reload

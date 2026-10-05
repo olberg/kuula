@@ -12,22 +12,24 @@ use super::profile::profile_violations;
 use super::*;
 use crate::cell::{self, CellError, Note};
 
-pub(super) struct Ctx {
-    pub(super) diags: Vec<Diag>,
+/// What reading a payload has found so far; the bank loader (OMQ) reads its instruments, samples
+/// and tracks with the same one.
+pub(crate) struct Ctx {
+    pub(crate) diags: Vec<Diag>,
     /// The song's minor version is above the reader's (section 1).
-    pub(super) later: bool,
+    pub(crate) later: bool,
 }
 
 impl Ctx {
-    pub(super) fn error(&mut self, code: &str, path: impl Into<String>) {
+    pub(crate) fn error(&mut self, code: &str, path: impl Into<String>) {
         self.diags.push(Diag { code: code.to_string(), path: path.into(), error: true });
     }
 
-    pub(super) fn warn(&mut self, code: &str, path: impl Into<String>) {
+    pub(crate) fn warn(&mut self, code: &str, path: impl Into<String>) {
         self.diags.push(Diag { code: code.to_string(), path: path.into(), error: false });
     }
 
-    pub(super) fn members(&mut self, obj: &Map<String, Value>, known: &[&str], path: &str) {
+    pub(crate) fn members(&mut self, obj: &Map<String, Value>, known: &[&str], path: &str) {
         for key in obj.keys() {
             if !known.contains(&key.as_str()) {
                 self.warn("unknown-member", join(path, key));
@@ -36,7 +38,7 @@ impl Ctx {
     }
 
     /// An integer member within [lo, hi]: `default` when absent (`None` for a required member).
-    pub(super) fn int(&mut self, obj: &Map<String, Value>, key: &str, path: &str, lo: i64, hi: i64, default: Option<i64>) -> Option<i64> {
+    pub(crate) fn int(&mut self, obj: &Map<String, Value>, key: &str, path: &str, lo: i64, hi: i64, default: Option<i64>) -> Option<i64> {
         match obj.get(key) {
             None => {
                 if default.is_none() {
@@ -54,7 +56,7 @@ impl Ctx {
         }
     }
 
-    pub(super) fn string(&mut self, obj: &Map<String, Value>, key: &str, path: &str) -> String {
+    pub(crate) fn string(&mut self, obj: &Map<String, Value>, key: &str, path: &str) -> String {
         match obj.get(key) {
             None => String::new(),
             Some(Value::String(s)) => s.clone(),
@@ -65,7 +67,7 @@ impl Ctx {
         }
     }
 
-    pub(super) fn object<'a>(&mut self, v: &'a Value, path: &str) -> Option<&'a Map<String, Value>> {
+    pub(crate) fn object<'a>(&mut self, v: &'a Value, path: &str) -> Option<&'a Map<String, Value>> {
         let o = v.as_object();
         if o.is_none() {
             self.error("bad-value", path);
@@ -73,7 +75,7 @@ impl Ctx {
         o
     }
 
-    pub(super) fn array<'a>(&mut self, obj: &'a Map<String, Value>, key: &str, path: &str, required: bool) -> Option<&'a Vec<Value>> {
+    pub(crate) fn array<'a>(&mut self, obj: &'a Map<String, Value>, key: &str, path: &str, required: bool) -> Option<&'a Vec<Value>> {
         match obj.get(key) {
             None => {
                 if required {
@@ -90,7 +92,7 @@ impl Ctx {
     }
 }
 
-pub(super) fn join(path: &str, key: &str) -> String {
+pub(crate) fn join(path: &str, key: &str) -> String {
     if path.is_empty() { key.to_string() } else { format!("{path}.{key}") }
 }
 
@@ -177,40 +179,9 @@ fn load_song(cx: &mut Ctx, payload: &[u8], resources: &[Source], reader: (u32, u
             None
         }
     };
-    let rate = cx.int(&root, "rate", "", 8000, 192000, None);
-    let tick = match root.get("tick") {
-        None => {
-            cx.error("missing-member", "tick");
-            None
-        }
-        Some(Value::Array(a)) if a.len() == 2 => {
-            let n = a[0].as_i64().filter(|&n| n >= 1);
-            let d = a[1].as_i64().filter(|&d| d >= 1);
-            match (n, d, rate) {
-                (Some(n), Some(d), Some(r)) if n as u128 * r as u128 >= d as u128 => Some((n as u64, d as u64)),
-                (Some(n), Some(d), None) => Some((n as u64, d as u64)),
-                _ => {
-                    cx.error("bad-value", "tick");
-                    None
-                }
-            }
-        }
-        Some(_) => {
-            cx.error("bad-value", "tick");
-            None
-        }
-    };
+    let (rate, tick) = load_rate_tick(cx, &root);
     let ticks_per_beat = cx.int(&root, "ticksPerBeat", "", 1, i64::MAX, Some(0)).map(|n| n as u64).filter(|&n| n > 0);
-    let volume = cx.int(&root, "volume", "", 0, 1024, Some(256)).unwrap_or(256) as i32;
-    let resampling = match root.get("resampling") {
-        None => Resampling::Nearest,
-        Some(Value::String(s)) if s == "nearest" => Resampling::Nearest,
-        Some(Value::String(s)) if s == "linear" => Resampling::Linear,
-        Some(_) => {
-            cx.error("bad-value", "resampling");
-            Resampling::Nearest
-        }
-    };
+    let (volume, resampling) = load_volume_resampling(cx, &root);
 
     let channels = load_channels(cx, &root);
     let samples = load_samples(cx, &root, resources);
@@ -237,6 +208,49 @@ fn load_song(cx: &mut Ctx, payload: &[u8], resources: &[Source], reader: (u32, u
     };
     check_song(cx, &song, &index, &used_samples);
     Some(song)
+}
+
+/// The `rate` and the `tick` of a payload (sections 1 and 2), each `None` when missing or bad.
+pub(crate) fn load_rate_tick(cx: &mut Ctx, root: &Map<String, Value>) -> (Option<i64>, Option<(u64, u64)>) {
+    let rate = cx.int(root, "rate", "", 8000, 192000, None);
+    let tick = match root.get("tick") {
+        None => {
+            cx.error("missing-member", "tick");
+            None
+        }
+        Some(Value::Array(a)) if a.len() == 2 => {
+            let n = a[0].as_i64().filter(|&n| n >= 1);
+            let d = a[1].as_i64().filter(|&d| d >= 1);
+            match (n, d, rate) {
+                (Some(n), Some(d), Some(r)) if n as u128 * r as u128 >= d as u128 => Some((n as u64, d as u64)),
+                (Some(n), Some(d), None) => Some((n as u64, d as u64)),
+                _ => {
+                    cx.error("bad-value", "tick");
+                    None
+                }
+            }
+        }
+        Some(_) => {
+            cx.error("bad-value", "tick");
+            None
+        }
+    };
+    (rate, tick)
+}
+
+/// The `volume` and the `resampling` of a payload (section 1), a bad one read as its default.
+pub(crate) fn load_volume_resampling(cx: &mut Ctx, root: &Map<String, Value>) -> (i32, Resampling) {
+    let volume = cx.int(root, "volume", "", 0, 1024, Some(256)).unwrap_or(256) as i32;
+    let resampling = match root.get("resampling") {
+        None => Resampling::Nearest,
+        Some(Value::String(s)) if s == "nearest" => Resampling::Nearest,
+        Some(Value::String(s)) if s == "linear" => Resampling::Linear,
+        Some(_) => {
+            cx.error("bad-value", "resampling");
+            Resampling::Nearest
+        }
+    };
+    (volume, resampling)
 }
 
 fn load_channels(cx: &mut Ctx, root: &Map<String, Value>) -> Option<Vec<Channel>> {
@@ -272,7 +286,7 @@ fn load_channels(cx: &mut Ctx, root: &Map<String, Value>) -> Option<Vec<Channel>
     Some(out)
 }
 
-fn load_tracks(cx: &mut Ctx, root: &Map<String, Value>, instruments: &[Option<Arc<Instrument>>]) -> Vec<Track> {
+pub(crate) fn load_tracks(cx: &mut Ctx, root: &Map<String, Value>, instruments: &[Option<Arc<Instrument>>]) -> Vec<Track> {
     let mut out = Vec::new();
     let Some(list) = cx.array(root, "tracks", "", false) else { return out };
     if list.len() > MAX_TRACKS {

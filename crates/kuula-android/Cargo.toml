@@ -1,0 +1,30 @@
+[package]
+name = "kuula-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kuula as an Android app: a native activity in Rust."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kuula-core.workspace = true
+kuula-lua.workspace = true
+kuula-host-common.workspace = true
+kuula-touch.workspace = true
+log = "0.4"
+
+# Everything that names an Android API: absent on the desktop, where the
+# crate is only its plain modules and their tests.
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+# The window's buffer, and AAudio (`audio`).
+ndk = { version = "0.9", features = ["audio"] }
+android_logger = "0.15"
+# Finishing the activity, hiding the system's bars and asking where the
+# display's cutout is are calls into the JVM.
+jni = "0.22"
+# stdout and stderr go to the log through a pipe; the audio stream's
+# timestamps are on a clock read with `clock_gettime`.
+libc = "0.2"

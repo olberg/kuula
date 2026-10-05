@@ -241,6 +241,9 @@ pub struct Player {
     /// A host's gain for each channel, 0..=256 with 256 as unity: not the song's, so a rendering
     /// leaves it alone.
     gain: Vec<i64>,
+    /// A host's transposition for each channel, in pitch units: added wherever the instrument's
+    /// `transpose` is used for the channel's notes, and 0 unless a host sets it (OMQ section 5).
+    transpose: Vec<i32>,
     jams: Vec<Jam>,
     /// Time: the segment, the ticks started in it, the frame reached and where the tick ends.
     segment: Segment,
@@ -272,6 +275,7 @@ impl Player {
             channels: vec![Chan::default(); n],
             mute: vec![false; n],
             gain: vec![256; n],
+            transpose: vec![0; n],
             jams: Vec::new(),
             segment,
             tick: 0,
@@ -305,6 +309,7 @@ impl Player {
         self.channels.resize(n, Chan::default());
         self.mute.resize(n, false);
         self.gain.resize(n, 256);
+        self.transpose.resize(n, 0);
         self.song = song;
         // The row being played keeps its curves if the song still has it.
         let tracks = &self.song.tracks;
@@ -447,6 +452,18 @@ impl Player {
         }
     }
 
+    /// A host's transposition for a channel's notes, in pitch units, 0 (the start's) being none: it
+    /// is added to the `transpose` of every instrument wherever that is used for the channel's
+    /// notes: the pitch a new voice starts at, a retarget's target, a retriggered voice's, the
+    /// duplicate check's and the note soft noise takes its gain from, but not the key-map lookup,
+    /// which reads the note as written. The sum isn't held to `transpose`'s range; pitches are
+    /// clamped where they always are. A player's own control, as `set_gain` is (OMQ section 5).
+    pub fn set_transpose(&mut self, channel: usize, transpose: i32) {
+        if let Some(t) = self.transpose.get_mut(channel) {
+            *t = transpose;
+        }
+    }
+
     /// True when no voice of the channel is sounding, foreground or background.
     pub fn channel_silent(&self, channel: usize) -> bool {
         self.channels.get(channel).is_none_or(|c| c.voice.is_none() && c.background.is_empty())
@@ -481,6 +498,16 @@ impl Player {
                 self.jams.remove(0);
             }
         }
+    }
+
+    /// Starts a note on a channel outside the song's note data, as a host does for a cue (OMQ
+    /// section 4): `ins` for the pitch `note` as written, sounding at `pitch`, with the note volume
+    /// `vol` and the channel's pan. The voice it replaces is cut. No event is recorded.
+    pub(crate) fn start_voice(&mut self, channel: usize, ins: u8, note: i32, pitch: i32, vol: i32) {
+        let song = self.song.clone();
+        let Some(instrument) = song.instrument(ins) else { return };
+        let Some(pan) = song.channels.get(channel).map(|c| c.pan) else { return };
+        self.channels[channel].voice = Voice::new(&song, instrument, note, pitch, vol, pan, 0);
     }
 
     pub fn jam_off(&mut self, key: i32) {
@@ -858,7 +885,14 @@ pub fn render(song: Arc<Song>, a: usize) -> Rendering {
 /// As `render`, stopping after `limit` frames instead of one hour (`too_long` then set): for a
 /// program that wants less than the hour, such as a fuzzer.
 pub fn render_limited(song: Arc<Song>, a: usize, limit: u64) -> Rendering {
+    render_with(song, a, limit, |_| {})
+}
+
+/// As `render_limited`, with `setup` run on the player before it starts: for a host's controls, as
+/// a cue's trigger sets them (OMQ section 6).
+pub fn render_with(song: Arc<Song>, a: usize, limit: u64, setup: impl FnOnce(&mut Player)) -> Rendering {
     let mut p = Player::new(song);
+    setup(&mut p);
     p.record_trace();
     p.once = true;
     p.play(a, 0, 0, Mode::Song);

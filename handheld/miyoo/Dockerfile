@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 #
-# The Miyoo Mini (Plus) build: an armv7 glibc `kuula` without networking,
+# The Miyoo Mini (Plus) build: an armv7 glibc `kuula`, without networking
+# and, as `kuula-net`, with it,
 # linked against the steward-fu SDL2 fork that OnionOS ports ship. Build
 # it from the repository root:
 #
@@ -95,6 +96,18 @@ RUN --mount=type=cache,id=kuula-miyoo-registry,target=/usr/local/cargo/registry 
     cp /usr/arm-linux-gnueabihf/lib/libgcc_s.so.1 /out/;     mkdir -p /out/link-libs;     cp /opt/miyoo/lib/libmi_*.so /opt/miyoo/lib/libshmvar.so /opt/miyoo/lib/libssgfx.so /out/link-libs/
 # link-libs holds the SigmaStar libraries libSDL2 names; the device has its
 # own, and they are here only so the binary can be loaded under emulation.
+# The same binary with the `net` feature, for the Mini Plus, which has
+# Wi-Fi: Iroh, tokio, QUIC and TLS against the same glibc. It is built
+# second and copied out at once, because the test build below puts the
+# binary without networking back at the same path.
+RUN --mount=type=cache,id=kuula-miyoo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=kuula-miyoo-target,target=/cache/target \
+    set -e; \
+    cargo build --release --locked --target armv7-unknown-linux-gnueabihf -p kuula-cli; \
+    cp /cache/target/armv7-unknown-linux-gnueabihf/release/kuula /out/kuula-net; \
+    arm-linux-gnueabihf-strip -o /out/kuula-net.stripped /out/kuula-net; \
+    arm-linux-gnueabihf-readelf -d /out/kuula-net.stripped | grep -E 'NEEDED|RPATH|RUNPATH' > /out/needed-net.txt; \
+    arm-linux-gnueabihf-objdump -T /out/kuula-net.stripped | grep -o 'GLIBC_[0-9.]*' | sort -uV > /out/glibc-symbols-net.txt
 # The conformance oracles as armv7 test binaries, to run under emulation
 # (they need no SDL, only the examples directory).
 # `omt` pins the song engine's PCM on this CPU: the canonical example's hash.

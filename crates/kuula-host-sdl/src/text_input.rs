@@ -1,4 +1,6 @@
 //! Desktop input for shell-only fields. Clipboard access is player initiated.
+//! The host does not call `event` on a handheld, whose buttons are keys:
+//! there a field is filled with the shell's on-screen keys alone.
 //! The supplied KeyState holds only synthetic editor buttons, independently
 //! of physical keyboard state, so releasing Enter cannot release a held Z.
 use crate::keys::KeyState;
@@ -32,25 +34,20 @@ fn paste(view: &mut View, video: &VideoSubsystem) {
         Err(e) => view.detail = format!("Cannot read clipboard: {e}"),
     }
 }
-// Key-up survives the editor closing on key-down. Escape also releases
-// the ordinary Menu mapping in the caller when no editor is open.
-fn release_editor_key(event: &Event, keys: &mut KeyState) -> bool {
+// Key-up survives the editor closing on key-down. The event is left to
+// the caller, which releases the key's ordinary mapping: Start for Enter
+// and Menu for Escape, held or not.
+fn release_editor_key(event: &Event, keys: &mut KeyState) {
     match event {
         Event::KeyUp {
             keycode: Some(Keycode::Return),
             ..
-        } => {
-            keys.release(Keycode::Z);
-            true
-        }
+        } => keys.release(Keycode::Z),
         Event::KeyUp {
             keycode: Some(Keycode::Escape),
             ..
-        } => {
-            keys.release(Keycode::X);
-            false
-        }
-        _ => false,
+        } => keys.release(Keycode::X),
+        _ => {}
     }
 }
 pub fn event(
@@ -59,8 +56,11 @@ pub fn event(
     video: &VideoSubsystem,
     keys: &mut KeyState,
 ) -> bool {
-    if release_editor_key(event, keys) {
-        return true;
+    release_editor_key(event, keys);
+    // A question about a developer covers a field that is being edited:
+    // the keys answer it, and none of them is typed into what is hidden.
+    if console.dev_view().is_some_and(|d| !d.pending.is_empty()) {
+        return false;
     }
     let Some(v) = console.network_view_mut().filter(|v| !v.editing.is_empty()) else {
         return false;

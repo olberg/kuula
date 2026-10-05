@@ -58,7 +58,7 @@ jobs:
         run: cargo build --release --locked -p kuula-cli
 
       # The binary beside what it needs to be tried: the example carts
-      # (the shell lists `examples/`), the game and the documentation.
+      # (the shell lists `examples/`), the two games and the documentation.
       - name: Package
         run: |
           dir="kuula-$VERSION-${{ matrix.name }}"
@@ -68,7 +68,7 @@ jobs:
           else
             cp target/release/kuula "$dir/"
           fi
-          cp -r LICENSE README.md docs examples alien-invaders "$dir/"
+          cp -r LICENSE README.md docs examples alien-invaders fenlight kilnhollow "$dir/"
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a -tzip "$dir.zip" "$dir"
           else

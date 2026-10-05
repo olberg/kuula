@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use kuula_core::input::{BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_MENU, BTN_RIGHT, BTN_UP};
+use kuula_core::input::{BTN_MENU, BUTTON_NAMES};
 use kuula_core::FrameInput;
 use serde::Deserialize;
 
@@ -50,18 +50,14 @@ pub struct InputScript {
     pub frames: Vec<FrameInput>,
 }
 
-/// The bit for a button name, case-insensitive.
-pub fn button_bit(name: &str) -> Option<u8> {
-    match name.to_ascii_lowercase().as_str() {
-        "up" => Some(BTN_UP),
-        "down" => Some(BTN_DOWN),
-        "left" => Some(BTN_LEFT),
-        "right" => Some(BTN_RIGHT),
-        "a" => Some(BTN_A),
-        "menu" => Some(BTN_MENU),
-        "b" => Some(BTN_B),
-        _ => None,
+/// The bit for a button name, case-insensitive: a cart's buttons by the
+/// names in [`BUTTON_NAMES`], and `menu`.
+pub fn button_bit(name: &str) -> Option<u16> {
+    let name = name.to_ascii_lowercase();
+    if name == "menu" {
+        return Some(BTN_MENU);
     }
+    BUTTON_NAMES.iter().position(|n| *n == name).map(|n| 1 << n)
 }
 
 impl InputScript {
@@ -84,11 +80,12 @@ impl InputScript {
         let mut frames = Vec::new();
         let mut total: u64 = 0;
         for (i, run) in runs.iter().enumerate() {
-            let mut bits = 0u8;
+            let mut bits = 0u16;
             for b in &run.buttons {
                 bits |= button_bit(b).ok_or_else(|| ScriptError {
                     message: format!(
-                        "input script run {i}: unknown button {b:?} (up, down, left, right, a, b)"
+                        "input script run {i}: unknown button {b:?} ({})",
+                        BUTTON_NAMES.join(", ")
                     ),
                 })?;
             }
@@ -120,6 +117,9 @@ impl InputScript {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kuula_core::input::{
+        BTN_A, BTN_B, BTN_L1, BTN_R2, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_X, BTN_Y, CART_BUTTONS,
+    };
 
     #[test]
     fn runs_expand_in_order() {
@@ -140,9 +140,31 @@ mod tests {
     }
 
     #[test]
+    fn every_button_has_a_name() {
+        let s = InputScript::parse(
+            r#"[{"buttons": ["x", "Y"]}, {"buttons": ["l1", "r2"]}, {"buttons": ["start", "select"]}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.frames,
+            [
+                FrameInput::new(BTN_X | BTN_Y),
+                FrameInput::new(BTN_L1 | BTN_R2),
+                FrameInput::new(BTN_START | BTN_SELECT),
+            ]
+        );
+        let all = BUTTON_NAMES
+            .iter()
+            .fold(0, |bits, name| bits | button_bit(name).unwrap());
+        assert_eq!(all, CART_BUTTONS);
+        assert_eq!(button_bit("Menu"), Some(BTN_MENU));
+    }
+
+    #[test]
     fn bad_scripts_are_errors() {
-        let e = InputScript::parse(r#"[{"buttons": ["start"]}]"#).unwrap_err();
-        assert!(e.message.contains("start"), "{e}");
+        let e = InputScript::parse(r#"[{"buttons": ["turbo"]}]"#).unwrap_err();
+        assert!(e.message.contains("turbo"), "{e}");
+        assert!(e.message.contains("l1, r1, l2, r2, start, select"), "{e}");
         assert!(InputScript::parse("not json").is_err());
         assert!(
             InputScript::parse(r#"[{"frame": 1}]"#).is_err(),

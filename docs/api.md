@@ -1,17 +1,18 @@
 ---
 title: Kuula cart API reference
 status: current; the reference tables are generated from the binding descriptors in `crates/kuula-lua/src` (`cargo run -p kuula-apidoc -- --check`)
-date: 2026-09-11
+date: 2026-10-05
 related:
   - skill.md (constraints and idioms; read it first)
-  - songs.md (the appendix: the song files `sfx` and `music` play)
+  - songs.md (the appendix: the song files `sfx` and `music` play, and the banks `cue` plays)
 ---
 
 # Kuula cart API
 
 A cart is a directory (or a zip built from one) holding `main.lua`, an
 optional `cart.toml`, and assets under `gfx/`, `map/`, `src/`, `sfx/`,
-`music/` and `samples/`. The cart runs Lua 5.5 in a sandbox at a fixed
+`music/`, `cues/` and `samples/`. The cart runs Lua 5.5 in a sandbox at a
+fixed
 60 Hz. Every call below is a global; there are no modules to require for
 the API itself.
 
@@ -154,6 +155,7 @@ Sprites are read from the current *sheet*, a `u8` buffer selected with
 | `sheet()` | nothing; clears the sheet | 1 |
 | `spr(n, x, y, [w, h, flip_x, flip_y])` | nothing; draws `w` by `h` cells from cell `n` | 1 + touched / 3 |
 | `sspr(sx, sy, sw, sh, dx, dy, [dw, dh, flip_x, flip_y])` | nothing; scaled copy of a sheet rectangle | 1 + touched / 3 |
+| `tline(x0, y0, x1, y1, u, v, du, dv, [sx, sy, sw, sh, thick])` | nothing; a line of pixels sampling the sheet at `(u, v)` and stepping `(du, dv)` texels a pixel | 1 + touched / 3 |
 | `map(m, cx, cy, sx, sy, cw, ch, [layer])` | nothing; draws `cw` by `ch` cells of map `m` from cell `(cx, cy)` with its top-left at `(sx, sy)`, through the sheet | 2 per cell requested + 1 + touched / 3 |
 
 - `sheet`: Errors: `buf_kind_mismatch`, `buf_released`.
@@ -161,6 +163,29 @@ Sprites are read from the current *sheet*, a `u8` buffer selected with
   1, `flip_x` = false, `flip_y` = false. Errors: `no_sheet`.
 - `sspr`: Defaults: `dw` = sw, `dh` = sh, `flip_x` = false, `flip_y` =
   false. Errors: `no_sheet`.
+- `tline`: Both ends are drawn, along the same line `line` would draw,
+  and the sheet is sampled the same way for a row, a column or a slant:
+  pixel `i` of the line, counting from the first end, reads texel `(u +
+  i * du, v + i * dv)`, rounded down. That is a perspective floor drawn
+  a row at a time, and a textured wall drawn a column at a time with
+  `dv` the texels a pixel of the column covers. `sx, sy, sw, sh` name
+  the rectangle of the sheet the texels are in; the position wraps round
+  its edges, whatever its size, so a floor tile repeats and a column
+  longer than its texture starts it again. A rectangle not wholly in the
+  sheet is cut to the sheet, and `u, v` count from the corner of the cut
+  one; a rectangle with no sheet in it draws nothing. `u, v, du, dv` are
+  fixed point with sixteen fraction bits, so a step finer than 1/65536
+  of a texel is lost, and their magnitudes saturate at 2^32. Only the
+  part of the line in the clip is walked and paid for, with a camera
+  offset and the colour table applied as for `sspr` and no fill pattern.
+  With `thick` above 1 each step of the line draws that many pixels of
+  its texel side by side: down from a row, to the right of a column (a
+  slanted line counts as a row when it is at least as wide as it is
+  tall). A pair of columns drawn as one, or a floor drawn two rows at a
+  time, is half the calls for half the detail across. A line is paid
+  like any draw call, by the pixels it touches. Defaults: `sx` = 0, `sy`
+  = 0, `sw` = the sheet's width from `sx` on, `sh` = the sheet's height
+  from `sy` on, `thick` = 1. Errors: `no_sheet`.
 - `map`: Map cells are sprite numbers into the current sheet; a negative
   cell draws nothing. A layer outside the map's layers draws nothing.
   `not_a_map` when `m` was not made by `load_map`. Defaults: `layer` =
@@ -250,10 +275,42 @@ and any other colour is `asset_invalid`. Maps are JSON:
 
 ## Input
 
-Six logical buttons: 0 up, 1 down, 2 left, 3 right, 4 A, 5 B. On the
-desktop host the arrows, Z (A) and X (B) drive them. The two-button tier
-means a cart should be playable with the D-pad plus A and B; there are
-no other buttons.
+Fourteen logical buttons, each with a number:
+
+| n | button | desktop key | n | button | desktop key |
+|---|---|---|---|---|---|
+| 0 | up | Up | 7 | Y | V |
+| 1 | down | Down | 8 | L1 | A |
+| 2 | left | Left | 9 | R1 | S |
+| 3 | right | Right | 10 | L2 | Q |
+| 4 | A | Z | 11 | R2 | W |
+| 5 | B | X | 12 | Start | Enter |
+| 6 | X | C | 13 | Select | Right Shift |
+
+A cart has the first six, the D-pad, A and B. That is the **two-button
+tier**: every device has them, a phone as controls on its screen, and a
+cart that needs no more plays everywhere. The other eight are on every
+handheld with buttons and on a controller, and a cart has them when its
+`cart.toml` says `buttons = "all"`; a phone then shows them on its
+screen as well. A button the manifest does not declare reads as
+released on every device, whatever is held, so a cart cannot come to
+depend on one without saying so.
+
+L2 and R2 are buttons: a controller's triggers hold them once pulled a
+quarter of the way. A controller's buttons go by their names, and the
+keys in the table are the desktop host's.
+
+Menu is not a cart's button: it opens the console's pause menu (Escape
+on the desktop host). Start and Select held together are Menu too, for
+a controller with no Menu of its own, in every run, played or scripted:
+from the frame both are down neither reaches the cart until both are
+up, so a cart never sees both at once. Played by hand, the two reach a
+cart six frames after they are pressed, so that pressing them together
+does not give the cart whichever landed first. In a cart that has not
+declared them, Start or Select alone opens the pause menu, as Menu
+does, and on the console's own screens Start chooses, as A does.
+`examples/buttons` shows every button and its number, lit while it is
+held.
 
 <!-- generated: input -->
 | call | returns | cycles |
@@ -261,7 +318,8 @@ no other buttons.
 | `btn(n)` | `true` while button `n` is held this frame; `false` for any other `n` | 1 |
 
 - `btn`: There is no `btnp`; keep last frame's state yourself to detect
-  presses.
+  presses. Buttons 6 to 13 are held only in a cart whose manifest says
+  `buttons = "all"`.
 <!-- /generated -->
 
 ## Logging and stats
@@ -370,51 +428,110 @@ split the work.
 
 Eight channels, 44.1 kHz stereo, rendered per frame. Sounds come from
 `sfx/*.omc` and `music/*.omc` (one Open Module Track song each, in the
-`kuula` profile) and `samples/*.wav` (8 or 16-bit mono PCM). Songs and
-WAV files share 2 MiB of sample data. A name is the file's stem, as for
-`load_sheet`. Audio rendering is not charged; each call costs 1 cycle.
+`kuula` profile), `cues/*.omc` (a bank of Open Module Cues: a game's sound
+effects in one file, each asked for by name) and `samples/*.wav` (8 or
+16-bit mono PCM). Songs, banks and WAV files share 2 MiB of sample data. A
+name is the file's stem, as for `load_sheet`. Audio rendering is not
+charged; each call costs 1 cycle.
 [Appendix: song files](songs.md#appendix-song-files) describes an `.omc`
-file closely enough to write one from a script.
+file, of either kind, closely enough to write one from a script.
 
 Music takes channels 0 upward, one per channel of its song, and starting
 it cuts the music before it. A channel the song marks `reserved` is left
 to effects. An effect takes a run of consecutive channels, one per channel
-of its song, and a sample takes one. With a channel named, the sound goes
-there and cuts what holds it. Without one it goes to channels the music
-does not use, highest first, then to music channels that are quiet, then
-to one that is sounding, and it cuts another effect only when every run is
-held. While an effect or a sample holds a music channel, the music goes on
-in time and is silent there. `volume(channel, v)` stays with the channel
-through whatever plays on it. A call takes effect at the first sample of
-the frame it is made in.
+of its song, and a sample takes one. A cue takes a run too: one channel
+for each track it plays together, or one for an audio file. With a channel
+named, the sound goes there and cuts what holds it, and it keeps that
+channel until it ends: only another call that names the channel takes it
+away, so a voice line on a channel of its own is safe from the effects
+around it. Without a channel named, a sound goes to the channels the music
+does not use, highest first, and when those are all busy it cuts the
+oldest sound among them. It never takes a channel of the music, unless the
+cart has let some go: `music_channels(n)` makes the music keep only its
+first `n` channels, and its channels above them are then used when nothing
+else is free, the quiet ones first, with the music silent there meanwhile.
+A song for such a cart has the parts it can least do without on its lowest
+channels. A sound without a named channel that finds every run held by
+sounds placed by name is not played, and its call returns nil instead of
+a channel. When the music itself keeps a channel of every run the sound
+could take, the call is an `audio_no_room` error, and `music_channels` or
+a named channel is the way out.
+`volume(channel, v)` stays with the channel through whatever plays on it.
+A call takes effect at the first sample of the frame it is made in.
+
+`cue(bank, name)` varies a cue each time it plays, in pitch and level,
+within the ranges its bank gives that cue; a cue without ranges plays as
+written. The console takes the variations from a fixed sequence, so a run
+sounds the same every time. `cue(bank, name, transpose, gain)` sets them
+instead: a coin a semitone higher for each one of a streak is
+`cue("fx", "coin", streak)`, and `cue("fx", "coin", 0)` is the cue as
+written. A cue or an effect that loops plays until `stop(channel)` ends
+it, with the channel number the call returned, or until another sound
+takes its channel.
+
+A song can hold several versions of one piece, its arrangements, and
+`music(name, fade, version)` names the one that plays, by its name or its
+number. When that song is the music already, the call does not start it
+again: the music carries on in the version named from the row and tick it
+is at, so a game can change between a calm and an anxious version of its
+theme in the middle of a bar. The notes that are sounding are released and
+ring out, and each part of the new version comes in with its next note,
+so versions meant for this keep their notes short. The two stay on the same bar and beat when their order rows
+have the same lengths. `music(name)` without a version starts the song
+from its beginning, and so does a call with one while the music is fading
+out after `music(nil, fade)`.
 
 <!-- generated: audio -->
 | call | returns | cycles |
 |---|---|---|
-| `sfx(name, [channel])` | the channel it plays on | 1 |
-| `music(name, [fade])` | nothing; starts the song, fading in over `fade` frames | 1 |
+| `sfx(name, [channel])` | the channel it plays on, or nil when it is not played | 1 |
+| `music(name, [fade, version])` | nothing; starts the song, fading in over `fade` frames | 1 |
 | `music()` | nothing; stops the music | 1 |
 | `music(nil, fade)` | nothing; fades the music out over `fade` frames | 1 |
-| `sample(name, [channel, pitch])` | the channel it plays on | 1 |
+| `sample(name, [channel, pitch])` | the channel it plays on, or nil when it is not played | 1 |
+| `cue(bank, name, [transpose, gain, channel])` | the first channel it plays on, or nil when it is not played | 1 |
+| `stop(channel, [cut])` | nothing; ends the cue, effect or sample holding the channel | 1 |
+| `music_channels([n])` | nothing; the music keeps its first `n` channels to itself | 1 |
 | `volume(channel, v)` | nothing; channel gain 0.0 to 1.0, clamped | 1 |
 
 - `sfx`: `name` is the stem of `sfx/<name>.omc`. Defaults: `channel` = a
   free one. Errors: `asset_not_found`, `asset_invalid`, `song_error`,
   `sample_error`, `audio_bad_channel`, `audio_no_room`.
-- `music`: `name` is the stem of `music/<name>.omc`. Defaults: `fade` =
-  0. Errors: `asset_not_found`, `asset_invalid`, `song_error`,
-  `sample_error`.
+- `music`: `name` is the stem of `music/<name>.omc`. `version` is the
+  name or the number of one of the song's arrangements. When the song is
+  the music already, it carries on in that version from the same row and
+  tick instead of starting again. Defaults: `fade` = 0, `version` = the
+  one the file selects. Errors: `asset_not_found`, `asset_invalid`,
+  `song_error`, `sample_error`, `version_not_found`.
 - `sample`: `name` is the stem of `samples/<name>.wav`. `pitch` 1.0 is
   native, clamped to 1/256 to 16. Defaults: `channel` = a free one,
   `pitch` = 1.0. Errors: `asset_not_found`, `asset_invalid`,
-  `sample_error`, `audio_bad_channel`.
+  `sample_error`, `audio_bad_channel`, `audio_no_room`.
+- `cue`: `bank` is the stem of `cues/<bank>.omc`, `name` a cue of that
+  bank. `transpose` is in semitones, clamped to 48 either way, and
+  `gain` 0.0 to 1.0. With neither, the console varies the cue within the
+  ranges its bank gives it. Defaults: `transpose` = 0 once `gain` is
+  given, `gain` = 1.0 once `transpose` is given, `channel` = a free run.
+  Errors: `asset_not_found`, `asset_invalid`, `song_error`,
+  `sample_error`, `cue_not_found`, `audio_bad_channel`, `audio_no_room`.
+- `stop`: A cue or an effect is released and its tail plays out; with
+  `cut` it is silent at once. The music is left alone. Defaults: `cut` =
+  false. Errors: `audio_bad_channel`.
+- `music_channels`: A sound that names no channel is never put on a
+  channel the music keeps. `n` is 0 to 8, clamped. A cart starts with
+  the music keeping all of its channels; a lower `n` lets effects take
+  its upper channels when nothing else is free. Defaults: `n` = all of
+  the music's channels.
 - `volume`: Errors: `audio_bad_channel`.
 <!-- /generated -->
 
 Audio errors are Lua errors: `asset_not_found` and `asset_invalid` for
 the file, `song_error` and `sample_error` for its contents,
-`audio_bad_channel` for a channel outside 0 to 7, and `audio_no_room`
-when a song has more channels than fit from the channel asked for.
+`cue_not_found` for a name its bank does not have, `version_not_found`
+for a version its song does not have, `audio_bad_channel` for a channel
+outside 0 to 7, and `audio_no_room` when a song or a cue has more
+channels than fit from the channel asked for, or asks for none while the
+music keeps a channel of every run it could take.
 
 ## Numeric profile
 
@@ -648,6 +765,7 @@ title = "My cart"          # shown by the host; untrusted text elsewhere
 author = "Ada Example"    # optional name, at most 128 UTF-8 bytes
 license = "MIT"           # optional exact SPDX identifier
 screen_mode = "640x480"    # or "320x240"; default 640x480
+buttons = "two"            # or "all"; the buttons the cart has, default "two"
 services = ["net"]         # host services the cart may use; only "net" exists
 
 [preload]
@@ -666,6 +784,10 @@ The shell cart list's B opens its info screen; MCP `run`, `state` and
 cart-provided text. The shell boot screen waits for A or B; a fresh press
 on the list is required to launch a cart.
 
+`buttons = "two"` is the D-pad, A and B; `"all"` adds X, Y, L1, R1, L2,
+R2, Start and Select. It decides what `btn` can see and what a touch
+screen shows (Input, above); MCP `run` returns it as `buttons`.
+
 Preloaded assets are live before `_init`, so `load_sheet("tiles")`
 costs 1 cycle. Names are one path component of letters, digits, `_` and
 `-`, no extension. A missing or undecodable preload is a fault at boot
@@ -673,7 +795,7 @@ costs 1 cycle. Names are one path component of letters, digits, `_` and
 
 Cart limits: at most 4096 files, 16 MiB per file, 64 MiB in total; only
 `main.lua`, `cart.toml` and files under `gfx/`, `map/`, `src/`, `sfx/`,
-`music/` and `samples/` are read.
+`music/`, `cues/` and `samples/` are read.
 
 ## Input scripts
 
@@ -690,10 +812,13 @@ holds some buttons for some frames, in order:
 ```
 
 `frames` defaults to 1, `buttons` to none; names are `up`, `down`,
-`left`, `right`, `a`, `b` (case-insensitive). Frames past the script's
-end get no input. A script may expand to at most 1,000,000 frames. The
-MCP `input` tool takes the same thing as raw masks instead: 1 up, 2
-down, 4 left, 8 right, 16 A, 32 B, or-ed together per frame.
+`left`, `right`, `a`, `b`, `x`, `y`, `l1`, `r1`, `l2`, `r2`, `start`
+and `select` (case-insensitive). Frames past the script's end get no
+input. A script may expand to at most 1,000,000 frames. The MCP `input`
+tool takes the same thing as raw masks instead: 1 up, 2 down, 4 left,
+8 right, 16 A, 32 B, 64 X, 128 Y, 256 L1, 512 R1, 1024 L2, 2048 R2,
+4096 Start, 8192 Select, or-ed together per frame. A script may hold a
+button the cart's manifest does not declare; the cart does not see it.
 
 ## Transcripts
 
@@ -715,7 +840,7 @@ per 96 KiB of each non-empty save slot, then one `{ buttons, frames }`
 record per run of identical inputs. Bounds: 1,000,000 frames, 256 KiB
 per line, 64 MiB per file. A truncated file, an unknown format version,
 a record carrying the reserved `messages` or `connections` fields, a
-run past the header's frame count or a button mask above 63 is refused
+run past the header's frame count or a button mask above 16383 is refused
 with `transcript_format`, `transcript_version` or `transcript_size`.
 
 A cart that declares the `net` service records **format version 2**:
@@ -770,6 +895,11 @@ cart never has `sys`; nothing here is cart API.
 | `sys.is_paused()` | whether the cart is paused | 1 |
 | `sys.running()` | whether a cart is running | 1 |
 | `sys.host_started()` | whether the host started a cart itself since the last call | 1 |
+| `sys.single()` | whether the shell was started on one cart | 1 |
+| `sys.exit()` | nothing; asks the host to end | 1 |
+| `sys.dev_state()` | 0 with no development receiver, 1 with one, 2 while a developer waits for an answer | 1 |
+| `sys.dev()` | the development receiver as `{active, pending, cart, bytes, from, note}` | 1 |
+| `sys.dev_action(answer)` | nothing; `"approve"` or `"refuse"` the pending developer | 1 |
 | `sys.menu()` | whether the menu button was pressed this frame | 1 |
 | `sys.fault()` | the running cart's fault as `{code, file, line, message}`, or `nil` | 1 |
 | `sys.settings()` | `{scale, volume, net}` | 1 |
@@ -780,6 +910,17 @@ cart never has `sys`; nothing here is cart API.
 | `sys.run_network(name, invite?)` | start the cart with an optional join ticket; permission is a separate setting | 1 |
 | `sys.net_action(action, value?, on?)` | queue browse(name), discovery(on), relay(url,on), edit(ticket/relay/empty), text(value), copy or paste | 1 |
 
+- `sys.single`: Such a shell opens the first cart of its list at once
+  and calls `sys.exit()` where it would have shown the list.
+- `sys.dev_state`: A number, so that asking every frame makes no table;
+  `sys.dev()` has the details.
+- `sys.dev`: `pending` is the endpoint id of a developer the receiver
+  refused because nobody has approved it, or an empty string; `cart`,
+  `bytes` and `from` are what it offered to send and the address it came
+  from. All of it is the sender's claim until the person holding the
+  device approves it.
+- `sys.dev_action`: Only after a player action. Another answer is a Lua
+  error.
 - `sys.set_net`: Withdrawing it while a cart has a session ends the
   session; the cart sees a `permission` event with `granted = false`.
 - `sys.set_scale`: A scale outside 1 to 4 is a Lua error.

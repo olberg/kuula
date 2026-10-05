@@ -22,6 +22,8 @@ impl Player {
     pub(super) fn note_on(&mut self, c: usize, ins_number: u8, note: i32, vol: i32, pan: i32, offset: u32, nna: Option<Action>) {
         let song = self.song.clone();
         let ins = song.instrument(ins_number);
+        // A host's transposition of the channel (OMQ section 5), added to the instrument's.
+        let host = self.transpose[c];
         // The duplicate check, on the new note's instrument: its starting pitch (the note with the
         // instrument's and the range's transpose) and its sample, whether or not it can play.
         if let Some(ins) = ins
@@ -29,7 +31,7 @@ impl Player {
             && s.dct != Duplicate::Off
         {
             let range = s.sample_for(note.div_euclid(256));
-            let pitch = note + ins.transpose + range.map_or(0, |r| r.1);
+            let pitch = note + ins.transpose + host + range.map_or(0, |r| r.1);
             let sample = range.map(|r| r.0);
             let is_duplicate = |v: &Voice| match s.dct {
                 Duplicate::Note => v.ins.number == ins.number && v.start_pitch == pitch,
@@ -54,7 +56,10 @@ impl Player {
                 self.channels[c].voice = if is_duplicate(&fg) { self.act(c, fg, s.dca) } else { Some(fg) };
             }
         }
-        let voice = ins.and_then(|ins| Voice::new(&song, ins, note, note + ins.transpose, vol, pan, offset));
+        let voice = ins.and_then(|ins| Voice::new(&song, ins, note, note + ins.transpose + host, vol, pan, offset)).map(|mut v| {
+            v.noise_note += host;
+            v
+        });
         // The foreground's new-note action.
         if let Some(fg) = self.channels[c].voice.take() {
             let action = fg.nna;
@@ -99,9 +104,10 @@ impl Player {
                 if port && self.channels[c].voice.is_some() {
                     // A retarget (section 6): the note with the voice's instrument's transpose and
                     // its key-map range's, whatever instrument the cell names; its written volume.
+                    let host = self.transpose[c];
                     let v = self.channels[c].voice.as_mut().unwrap();
-                    v.target = p + v.ins.transpose + v.zone_transpose;
-                    v.noise_note = p + v.ins.transpose;
+                    v.target = p + v.ins.transpose + host + v.zone_transpose;
+                    v.noise_note = p + v.ins.transpose + host;
                     if let Some(vol) = cell.vol {
                         v.vol = vol as i32;
                     }
@@ -160,7 +166,8 @@ impl Player {
             .clamp(0, 64);
         }
         // The sample was chosen by the note; a restart plays the same one at the same pitch and pan.
-        let voice = Voice::new(&song, &old.ins, old.note, old.note + old.ins.transpose, vol, old.pan, offset).map(|mut v| {
+        let base = old.note + old.ins.transpose + self.transpose[c];
+        let voice = Voice::new(&song, &old.ins, old.note, base, vol, old.pan, offset).map(|mut v| {
             v.base = old.base;
             v.target = old.target;
             v.noise_note = old.noise_note;

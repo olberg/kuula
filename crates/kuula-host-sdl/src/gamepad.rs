@@ -1,25 +1,35 @@
 //! Controller navigation uses the same logical buttons as the keyboard.
-use kuula_core::input::{BTN_A, BTN_B, BTN_DOWN, BTN_LEFT, BTN_MENU, BTN_RIGHT, BTN_UP};
-use sdl2::controller::{Button, GameController};
+use kuula_core::input::{
+    BTN_A, BTN_B, BTN_DOWN, BTN_L1, BTN_L2, BTN_LEFT, BTN_MENU, BTN_R1, BTN_R2, BTN_RIGHT,
+    BTN_SELECT, BTN_START, BTN_UP, BTN_X, BTN_Y,
+};
+use kuula_host_common::controls::trigger_pulled;
+use sdl2::controller::{Axis, Button, GameController};
 use sdl2::{event::Event, GameControllerSubsystem};
 
 pub struct Gamepads {
     subsystem: GameControllerSubsystem,
     pads: Vec<GameController>,
-    buttons: u8,
+    buttons: u16,
 }
-fn bit(b: Button) -> u8 {
-    match b {
-        Button::A => BTN_A,
-        Button::B => BTN_B,
-        Button::DPadUp => BTN_UP,
-        Button::DPadDown => BTN_DOWN,
-        Button::DPadLeft => BTN_LEFT,
-        Button::DPadRight => BTN_RIGHT,
-        Button::Start | Button::Guide => BTN_MENU,
-        _ => 0,
-    }
-}
+/// A controller's buttons by the names SDL gives them. Guide is Menu where
+/// it reaches the program at all; Start and Back held together are Menu
+/// everywhere, which the console sees to.
+const BUTTONS: [(Button, u16); 13] = [
+    (Button::A, BTN_A),
+    (Button::B, BTN_B),
+    (Button::X, BTN_X),
+    (Button::Y, BTN_Y),
+    (Button::DPadUp, BTN_UP),
+    (Button::DPadDown, BTN_DOWN),
+    (Button::DPadLeft, BTN_LEFT),
+    (Button::DPadRight, BTN_RIGHT),
+    (Button::LeftShoulder, BTN_L1),
+    (Button::RightShoulder, BTN_R1),
+    (Button::Start, BTN_START),
+    (Button::Back, BTN_SELECT),
+    (Button::Guide, BTN_MENU),
+];
 impl Gamepads {
     pub fn new(sdl: &sdl2::Sdl) -> Result<Self, String> {
         let subsystem = sdl.game_controller()?;
@@ -59,21 +69,19 @@ impl Gamepads {
             _ => {}
         }
     }
-    pub fn buttons(&mut self) -> u8 {
+    pub fn buttons(&mut self) -> u16 {
         self.buttons = 0;
         for pad in &self.pads {
-            for b in [
-                Button::A,
-                Button::B,
-                Button::DPadUp,
-                Button::DPadDown,
-                Button::DPadLeft,
-                Button::DPadRight,
-                Button::Start,
-                Button::Guide,
-            ] {
+            for (b, bit) in BUTTONS {
                 if pad.button(b) {
-                    self.buttons |= bit(b);
+                    self.buttons |= bit;
+                }
+            }
+            // L2 and R2 are axes to SDL, from 0 to `i16::MAX`, whether
+            // the controller has triggers that travel or two more buttons.
+            for (axis, bit) in [(Axis::TriggerLeft, BTN_L2), (Axis::TriggerRight, BTN_R2)] {
+                if trigger_pulled(pad.axis(axis) as f32 / i16::MAX as f32) {
+                    self.buttons |= bit;
                 }
             }
         }

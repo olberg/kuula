@@ -68,5 +68,10 @@ jobs:
       - name: Test the CLI without networking
         run: cargo test -p kuula-cli --no-default-features --locked --no-fail-fast
 
+      # Fenlight from its title to dawn. It is not among the tests above
+      # because it is five minutes of play.
+      - name: Play a whole game
+        run: cargo test -p kuula-cli --test games --locked -- --ignored
+
       - name: Check the API reference against the bindings
         run: cargo run --quiet --locked -p kuula-apidoc -- --check

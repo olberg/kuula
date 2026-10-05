@@ -51,7 +51,7 @@ fn capture(c: &Console, name: &str) {
         .unwrap();
     }
 }
-fn press(c: &mut Console, key: u8) {
+fn press(c: &mut Console, key: u16) {
     c.step(FrameInput::new(key));
     c.step(FrameInput::NONE);
 }
@@ -60,7 +60,7 @@ fn menu(c: &mut Console) {
     press(c, BTN_A);
     press(c, BTN_A);
 }
-fn tick(a: &mut Console, al: &mut Link, b: &mut Console, bl: &mut Link, ai: u8, bi: u8) {
+fn tick(a: &mut Console, al: &mut Link, b: &mut Console, bl: &mut Link, ai: u16, bi: u16) {
     a.step_linked(al, FrameInput::new(ai));
     b.step_linked(bl, FrameInput::new(bi));
     assert!(a.state().fault().is_none(), "{:?}", a.state());
